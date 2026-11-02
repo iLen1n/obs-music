@@ -34,6 +34,7 @@
   #setup input { width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid #333; background: #0e0e14; color: #fff; font-size: 15px; margin-top: 4px; }
   #setup button { margin-top: 18px; padding: 11px 18px; border: 0; border-radius: 9px; background: var(--acc); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }
   #setup code, #setup textarea { background: #0e0e14; border-radius: 6px; padding: 2px 6px; color: #d4b8ff; }
+  .plrow { display: flex; gap: 8px; align-items: center; margin-top: 6px; } .plrow input[type=text] { flex: 1; margin: 0; } .plrow input[type=radio] { width: auto; margin: 0; } .plrow .del { background: none; border: 0; color: #ff9b9b; font-size: 18px; cursor: pointer; margin: 0; padding: 0 4px; }
   #setup textarea { width: 100%; height: 110px; padding: 10px; border: 1px solid #333; font-size: 13px; }
   .row { display: flex; gap: 12px; } .row > div { flex: 1; }
   .ok { color: #8ef0a8; } .err { color: #ff9b9b; }
@@ -49,8 +50,10 @@
     <p>1. Создайте приложение на <a href="https://dev.twitch.tv/console/apps" target="_blank" style="color:#d4b8ff">dev.twitch.tv/console/apps</a>. В поле <b>OAuth Redirect URLs</b> вставьте ровно этот адрес:<br><code id="s-redirect"></code></p>
     <label>Client ID приложения
       <input id="s-client" placeholder="например 3x8ab1c2d3e4f5..." autocomplete="off"></label>
-    <label>ID плейлиста YouTube Music (фоновая музыка)
-      <input id="s-pl" value="PLJa2zpLICsN0"></label>
+    <label>Фоновые плейлисты — название и ссылка. ● — какой играет при запуске</label>
+    <div id="s-pls"></div>
+    <button type="button" id="s-addpl" style="margin-top:8px;padding:7px 12px;background:#333">+ Добавить плейлист</button>
+    <p><small>На стриме вы и модераторы переключаете их командой <code>!плейлист название</code>. Плейлисты должны быть «по ссылке» или открытыми.</small></p>
     <div class="row">
       <div><label>Награда «заказ»
         <input id="s-title" value="Музыка"></label></div>
@@ -110,7 +113,7 @@
   <div id="warn"></div>
   <div id="ytwrap"><div id="yt"></div></div>
 </div>
-<div id="lister"><div id="lister-yt"></div></div>
+<div id="lister"></div>
 
 <script>
 "use strict";
@@ -127,13 +130,33 @@ async function setupMode() {
   $('setup').style.display = 'block';
   $('s-redirect').textContent = PAGE;
   const saved = ls.get('setup', {});
-  const KEYS = ['client', 'pl', 'title', 'cost', 'utitle', 'ucost', 'stitle', 'scost', 'max', 'views', 'ytkey', 'per', 'vol'];
+  const KEYS = ['client', 'title', 'cost', 'utitle', 'ucost', 'stitle', 'scost', 'max', 'views', 'ytkey', 'per', 'vol'];
   for (const k of KEYS) if (saved[k] != null) $('s-' + k).value = saved[k];
+  const addRow = (n = '', link = '', def = false) => {
+    const d = document.createElement('div'); d.className = 'plrow';
+    d.innerHTML = `<input type="radio" name="defpl" title="Играет при запуске"><input type="text" class="pn" placeholder="Название, напр. Рок" style="max-width:170px"><input type="text" class="pl" placeholder="Ссылка на плейлист"><button type="button" class="del" title="Удалить">✕</button>`;
+    d.querySelector('.pn').value = n; d.querySelector('.pl').value = link; d.querySelector('input[type=radio]').checked = def;
+    d.querySelector('.del').onclick = () => d.remove();
+    $('s-pls').appendChild(d);
+  };
+  const savedPls = saved.pls || [{ n: 'Русские лайки', id: saved.pl || 'PLJa2zpLICsN0' }];
+  savedPls.forEach((x, i) => addRow(x.n, 'https://music.youtube.com/playlist?list=' + x.id, i === (saved.def || 0)));
+  $('s-addpl').onclick = () => addRow();
 
   $('s-login').onclick = () => {
     const cfg = {}; for (const k of KEYS) cfg[k] = $('s-' + k).value.trim();
     if (!cfg.client) return alert('Вставьте Client ID');
-    cfg.pl = extractPlaylistId(cfg.pl) || cfg.pl;
+    cfg.pls = []; cfg.def = 0;
+    for (const row of $('s-pls').querySelectorAll('.plrow')) {
+      const raw = row.querySelector('.pl').value.trim(), id = extractPlaylistId(raw) || (/^[A-Za-z0-9_-]{10,}$/.test(raw) ? raw : null);
+      const n = row.querySelector('.pn').value.trim();
+      if (!raw && !n) continue;
+      if (!id) return alert(`Не понял ссылку на плейлист «${n || raw}»`);
+      if (!n) return alert('Впишите название для каждого плейлиста');
+      if (row.querySelector('input[type=radio]').checked) cfg.def = cfg.pls.length;
+      cfg.pls.push({ n, id });
+    }
+    if (!cfg.pls.length) return alert('Добавьте хотя бы один плейлист');
     ls.set('setup', cfg);
     const scopes = ['channel:manage:redemptions', 'channel:read:redemptions', 'user:read:chat', 'user:write:chat', 'moderation:read'];
     location.href = 'https://id.twitch.tv/oauth2/authorize?response_type=token&force_verify=true'
@@ -156,7 +179,7 @@ async function setupMode() {
       { title: cfg.utitle || 'Срочно музыка', cost: cfg.ucost || 150, prompt: 'Трек без очереди: играет сразу после текущего заказа, раньше обычных. ' + linkPrompt, is_user_input_required: true },
       { title: cfg.stitle || 'Скип музыки', cost: cfg.scost || 300, prompt: 'Пропустить трек, который сейчас играет.', is_user_input_required: false },
     ]);
-    const p = new URLSearchParams({ token, pl: cfg.pl, rq: rq.id, ru: ru.id, rs: rs.id, max: cfg.max, views: cfg.views, per: cfg.per, vol: cfg.vol });
+    const p = new URLSearchParams({ token, pls: cfg.pls.map(x => x.n.replace(/[~|]/g, ' ') + '~' + x.id).join('|'), def: cfg.def || 0, rq: rq.id, ru: ru.id, rs: rs.id, max: cfg.max, views: cfg.views, per: cfg.per, vol: cfg.vol });
     if (cfg.ytkey) p.set('ytkey', cfg.ytkey);
     $('s-url').value = PAGE + '#' + p.toString();
     $('s-status').innerHTML = `<span class="ok">✅ Вход выполнен как <b>${esc(v.login)}</b>. Награды готовы: ${[rq, ru, rs].map(r => `«${esc(r.title)}» — ${r.cost}`).join(', ')} баллов.</span><br><small>Ключ действует примерно ${Math.round(v.expires_in / 86400)} дн., потом откройте эту страницу и войдите заново.</small>`;
@@ -216,7 +239,7 @@ function twitchApi(token, clientId) {
    ========================================================= */
 const S = {
   tw: null, me: null, rq: null, ru: null, rs: null,
-  maxSec: 360, minViews: 10000, ytKey: '', mods: new Set(), perUser: 2, volume: 40, plId: null,
+  maxSec: 360, minViews: 10000, ytKey: '', mods: new Set(), perUser: 2, volume: 40, pls: [], pl: null,
   queue: ls.get('queue', []),        // [{vid, user, userId, redemptionId}]
   bg: [], bgPos: 0,                  // фоновый плейлист
   current: null,                     // {vid, user?, redemptionId?, checked}
@@ -228,7 +251,10 @@ async function playerMode() {
   if (hashParams.get('video') === '1') $('ytwrap').classList.add('show');
   const token = hashParams.get('token');
   S.rq = hashParams.get('rq') || hashParams.get('reward'); S.ru = hashParams.get('ru'); S.rs = hashParams.get('rs');
-  S.plId = hashParams.get('pl');
+  S.pls = (hashParams.get('pls') || '').split('|').filter(Boolean).map(x => { const [n, id] = x.split('~'); return { n, id }; });
+  if (!S.pls.length && hashParams.get('pl')) S.pls = [{ n: 'Плейлист', id: hashParams.get('pl') }];
+  const lastPl = ls.get('activePl', null);
+  S.pl = S.pls.find(x => x.id === lastPl) || S.pls[parseInt(hashParams.get('def')) || 0] || S.pls[0] || null;
   S.maxSec = (parseFloat(hashParams.get('max')) || 6) * 60;
   S.minViews = hashParams.has('views') ? parseInt(hashParams.get('views')) || 0 : 10000;
   S.ytKey = hashParams.get('ytkey') || '';
@@ -245,7 +271,7 @@ async function playerMode() {
   } catch (e) { warn(e.message); }
 
   await loadYT();
-  S.bg = shuffle(await fetchPlaylistIds(S.plId));
+  S.bg = shuffle(await fetchPlaylistIds(S.pl?.id));
   if (!S.bg.length) warn('Не удалось загрузить фоновый плейлист. Он должен быть «Доступ по ссылке» или открытым.');
   S.player = new YT.Player('yt', {
     width: 320, height: 180,
@@ -389,7 +415,7 @@ async function resolveRedemption(r, ok) {
 function onChat(ev) {
   const text = (ev.message?.text || '').trim();
   if (!text.startsWith('!')) return;
-  const [cmd, arg] = text.split(/\s+/, 2);
+  const [cmd, ...rest] = text.split(/\s+/); const arg = rest.join(' ');
   const badges = (ev.badges || []).map(b => b.set_id);
   const isMod = badges.includes('broadcaster') || badges.includes('moderator') || ev.chatter_user_id === S.me.id;
   switch (cmd.toLowerCase()) {
@@ -409,11 +435,28 @@ function onChat(ev) {
     }
     case '!pause': case '!пауза': if (isMod) S.player?.pauseVideo(); return;
     case '!play': case '!плей': if (isMod) S.player?.playVideo(); return;
+    case '!playlist': case '!плейлист': {
+      const names = S.pls.map(x => x.n).join(', ');
+      if (!arg || !isMod) return say(`Сейчас играет плейлист «${S.pl?.n || '—'}». ${isMod ? 'Доступны: ' + names : ''}`.trim());
+      const a = arg.toLowerCase();
+      const found = S.pls.find(x => x.n.toLowerCase() === a) || S.pls.find(x => x.n.toLowerCase().startsWith(a)) || S.pls.find(x => x.n.toLowerCase().includes(a));
+      if (!found) return say(`Не нашёл плейлист «${arg}». Доступны: ${names}`);
+      return switchPlaylist(found);
+    }
     case '!clearqueue': case '!очистить':
       if (!isMod) return;
       S.queue.forEach(q => resolveRedemption(q, false));
       S.queue = []; saveQueue(); renderQueue(); return say('Очередь очищена, баллы вернул.');
   }
+}
+
+async function switchPlaylist(pl) {
+  const ids = await fetchPlaylistIds(pl.id);
+  if (!ids.length) return say(`Плейлист «${pl.n}» не загрузился — проверьте, что он «по ссылке» или открытый.`);
+  S.pl = pl; ls.set('activePl', pl.id);
+  S.bg = shuffle(ids); S.bgPos = 0;
+  say(`🎶 Фоновый плейлист: «${pl.n}» (${ids.length} треков)`);
+  if (!S.current || !S.current.redemptionId) next();   // заказы не прерываем
 }
 
 let sayBusy = Promise.resolve();
@@ -468,9 +511,10 @@ function fetchPlaylistIds(list) {
   return new Promise(resolve => {
     if (!list) return resolve([]);
     const ids = new Set(); let lastSize = -1, idx = 0, done = false;
-    const finish = () => { if (!done) { done = true; try { p.destroy(); } catch {} resolve([...ids]); } };
+    const finish = () => { if (!done) { done = true; try { p.destroy(); } catch {} $('lister').innerHTML = ''; resolve([...ids]); } };
     setTimeout(finish, 20000);
-    const p = new YT.Player('lister-yt', {
+    const host = document.createElement('div'); $('lister').appendChild(host);
+    const p = new YT.Player(host, {
       width: 200, height: 200, playerVars: { autoplay: 0, origin: location.origin },
       events: {
         onReady: () => p.cuePlaylist({ listType: 'playlist', list, index: 0 }),
@@ -538,7 +582,7 @@ function warn(t) { $('warn').textContent = '⚠️ ' + t; $('warn').style.displa
 function hideWarn() { $('warn').style.display = 'none'; }
 
 // экспорт для тестов
-window.__mp = { isoDur, extractVideoId, extractPlaylistId, S, onRedemption, onChat, next };
+window.__mp = { switchPlaylist, isoDur, extractVideoId, extractPlaylistId, S, onRedemption, onChat, next };
 
 if (hashParams.get('token')) playerMode(); else setupMode();
 </script>
