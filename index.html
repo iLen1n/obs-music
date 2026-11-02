@@ -25,6 +25,9 @@
   #warn { margin-top: 6px; font-size: 12px; color: #ffb4b4; background: var(--bg); border-radius: 8px; padding: 4px 10px; display: none; width: 460px; }
   #ytwrap { position: fixed; right: 0; bottom: 0; width: 320px; height: 180px; opacity: 0; pointer-events: none; }
   #ytwrap.show { opacity: 1; position: static; margin-top: 8px; }
+  #gear { position: fixed; top: 6px; right: 6px; width: 34px; height: 34px; border: 0; border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; font-size: 18px; cursor: pointer; opacity: 0; transition: opacity .2s; }
+  body:hover #gear { opacity: 1; }
+  body.cfg #setup { display: block !important; position: fixed; inset: 0; margin: 0; max-width: none; border-radius: 0; overflow: auto; z-index: 10; }
   #lister { position: fixed; left: -9999px; top: 0; width: 200px; height: 200px; }
 
   /* ---------- настройка ---------- */
@@ -53,7 +56,9 @@
 
 <!-- ===== Режим настройки (открывается в обычном браузере) ===== -->
 <div id="setup">
+  <button id="s-close" type="button" style="display:none;float:right;margin:0;background:#444">✕ Закрыть</button>
   <h1>🎵 Плеер для заказа музыки</h1>
+  <p id="s-notobs" style="display:none;background:#4a3a14;border-radius:10px;padding:10px 12px">⚠️ Эта страница открыта в обычном браузере, и настройки сохранятся только в нём. Плеер в OBS их не увидит. Настраивайте в OBS: <b>Док-панели → Пользовательские док-панели браузера</b>, адрес <code>https://ilen1n.github.io/obs-music/</code>.</p>
   <div id="s-step1">
     <p>1. Создайте приложение на <a href="https://dev.twitch.tv/console/apps" target="_blank" style="color:#d4b8ff">dev.twitch.tv/console/apps</a>. В поле <b>OAuth Redirect URLs</b> вставьте ровно этот адрес:<br><code id="s-redirect"></code></p>
     <label>Client ID приложения
@@ -101,11 +106,8 @@
   </div>
   <div id="s-step2">
     <p id="s-status"></p>
-    <div id="s-done" style="display:none">
-      <p>2. Скопируйте этот адрес и вставьте в OBS: <b>Источник → Браузер → URL</b>. Ширина 500, высота 400. Включите «Управлять звуком через OBS».<br><small>После каждого «Сохранить» адрес меняется — обновите его в OBS.</small></p>
-      <textarea id="s-url" readonly></textarea>
-      <p><small>⚠️ В адресе лежит ваш ключ Twitch. Не показывайте его на стриме и никому не отправляйте.</small></p>
-      <button id="s-copy">Скопировать</button>
+    <div id="s-done">
+      <p><b>Плеер в OBS:</b> Источник → Браузер, адрес <code>https://ilen1n.github.io/obs-music/#obs</code>, ширина 500, высота 400, включите «Управлять звуком через OBS». Адрес постоянный — менять его не нужно. Всё, что вы сохраните здесь, плеер применит сам через пару секунд.</p>
     </div>
   </div>
 </div>
@@ -123,6 +125,7 @@
   </div>
   <div id="queue"></div>
   <div id="warn"></div>
+  <button id="gear" type="button" title="Настройки">⚙</button>
   <div id="ytwrap"><div id="yt"></div></div>
 </div>
 <div id="lister"></div>
@@ -138,8 +141,8 @@ const ls = { get(k, d) { try { const v = localStorage.getItem('mp_' + k); return
 /* =========================================================
    РЕЖИМ НАСТРОЙКИ
    ========================================================= */
-async function setupMode() {
-  $('setup').style.display = 'block';
+async function setupMode(embedded) {
+  if (!embedded) $('setup').style.display = 'block';
   $('s-redirect').textContent = PAGE;
   const saved = ls.get('setup', {});
   const KEYS = ['client', 'title', 'cost', 'utitle', 'ucost', 'stitle', 'scost', 'max', 'views', 'ytkey', 'per', 'vol'];
@@ -174,42 +177,29 @@ async function setupMode() {
   };
   const savedMsg = (html, cls = 'ok') => { $('s-saved').innerHTML = `<span class="${cls}">${html}</span>`; };
 
-  // Собрать ссылку для OBS из сохранённого входа и настроек
-  const buildUrl = (cfg) => {
+  const showLogin = () => {
     const auth = ls.get('auth', null);
-    const p = new URLSearchParams({ seed: auth.seed, cid: auth.cid,
-      pls: cfg.pls.map(x => x.n.replace(/[~|]/g, ' ') + '~' + x.id).join('|'), def: cfg.def || 0,
-      t1: cfg.title, c1: cfg.cost, t2: cfg.utitle, c2: cfg.ucost, t3: cfg.stitle, c3: cfg.scost,
-      max: cfg.max, views: cfg.views, per: cfg.per, vol: cfg.vol });
-    if (cfg.ytkey) p.set('ytkey', cfg.ytkey);
-    $('s-url').value = PAGE + '#' + p.toString();
-    $('s-copy').textContent = 'Скопировать';
-    $('s-status').innerHTML = `<span class="ok">✅ Вы вошли как <b>${esc(auth.login)}</b>.</span><br><small>Вход продлевается сам, пока OBS с плеером запускается хотя бы раз в 30 дней.</small>`;
-    $('s-done').style.display = 'block';
+    $('s-status').innerHTML = auth ? `<span class="ok">✅ Вы вошли как <b>${esc(auth.login)}</b>.</span><br><small>Вход продлевается сам, пока OBS с плеером запускается хотя бы раз в 30 дней.</small>` : '';
   };
 
   const setLoggedIn = (on) => {
     $('s-login').textContent = on ? 'Выйти из Twitch' : 'Войти через Twitch';
     $('s-login').classList.toggle('out', on);
-    if (!on) { $('s-done').style.display = 'none'; $('s-status').innerHTML = ''; }
+    showLogin();
   };
 
   $('s-save').onclick = () => {
     const cfg = collect(); if (!cfg) return;
     ls.set('setup', cfg);
     const plInfo = `Плейлистов: ${cfg.pls.length} (${cfg.pls.map(x => '«' + esc(x.n) + '»').join(', ')}).`;
-    if (!ls.get('auth', null)) return savedMsg(`✅ Сохранено. ${plInfo} Войдите через Twitch, чтобы получить ссылку для OBS.`);
-    buildUrl(cfg);
-    savedMsg(`✅ Сохранено. ${plInfo} Ссылка для OBS обновлена ниже — замените её в OBS. Награды обновятся, когда OBS загрузит новую ссылку.`);
+    savedMsg(`✅ Сохранено. ${plInfo} ${ls.get('auth', null) ? 'Плеер применит настройки через пару секунд.' : 'Теперь войдите через Twitch.'}`);
   };
-
-  $('s-copy').onclick = () => { $('s-url').select(); navigator.clipboard?.writeText($('s-url').value); $('s-copy').textContent = 'Скопировано ✓'; };
 
   let polling = false;
   $('s-login').onclick = async () => {
     if (ls.get('auth', null)) {                        // ---- выход
       ls.set('auth', null); setLoggedIn(false);
-      return savedMsg('Вы вышли из Twitch на этой странице. Плеер в OBS продолжит работать, пока вы не отключите его: <a href="https://www.twitch.tv/settings/connections" target="_blank" style="color:#d4b8ff">twitch.tv/settings/connections</a> → найдите приложение → «Отключить».', '');
+      return savedMsg('Вы вышли из Twitch, плеер отключился от чата и наград.', '');
     }
     if (polling) return;
     const cfg = collect(); if (!cfg) return;          // ---- вход по коду
@@ -223,20 +213,20 @@ async function setupMode() {
           <small>Страница ждёт подтверждения…</small>`;
       });
       const v = await validate(tok.access_token);
-      ls.set('auth', { seed: tok.refresh_token, cid: cfg.client, login: v.login });
-      setLoggedIn(true);
       try {
         await ensureRewards(twitchApi(tok.access_token, cfg.client), v.user_id, rewardSpecs(cfg));
         savedMsg('✅ Вход выполнен, награды созданы на канале.');
       } catch (e) { savedMsg('Вход выполнен, но награды не создались: ' + esc(e.message), 'err'); }
-      buildUrl(cfg);
+      ls.set('auth', { refresh: tok.refresh_token, cid: cfg.client, login: v.login });
+      setLoggedIn(true);
     } catch (e) {
       $('s-status').innerHTML = `<span class="err">Ошибка входа: ${esc(e.message)}</span>`;
     } finally { polling = false; }
   };
 
   ls.set('token', null);                             // старый способ входа больше не используется
-  if (ls.get('auth', null)) { setLoggedIn(true); buildUrl(ls.get('setup', {}).pls ? ls.get('setup', {}) : collect()); }
+  if (!window.obsstudio) $('s-notobs').style.display = 'block';
+  setLoggedIn(!!ls.get('auth', null));
 }
 
 // Вход через Twitch по коду (Device Code Flow) — даёт ключ продления
@@ -321,13 +311,14 @@ function twitchApi(token, clientId, onExpired) {
 }
 
 // Ключ плеера в OBS: живая цепочка ключей продления хранится в OBS, ссылка содержит только первый ключ
-const AUTH = { cid: null, access: null, refresh: null, key: null, timer: null, busy: null };
+const AUTH = { cid: null, access: null, refresh: null, timer: null, busy: null };
 function refreshAccess() {
   if (AUTH.busy) return AUTH.busy;                   // ключ продления одноразовый — не продлеваем дважды параллельно
   AUTH.busy = (async () => {
     const { ok, j } = await oauthToken({ client_id: AUTH.cid, grant_type: 'refresh_token', refresh_token: AUTH.refresh });
-    if (!ok) throw new Error('Вход в Twitch истёк (OBS не запускался больше 30 дней, приложение отключено, или эту ссылку открывали в другом браузере). Войдите заново на странице настройки и вставьте новую ссылку в OBS.');
-    AUTH.access = j.access_token; AUTH.refresh = j.refresh_token; ls.set(AUTH.key, AUTH.refresh);
+    if (!ok) throw new Error('Вход в Twitch истёк (OBS не запускался больше 30 дней или приложение отключено). Откройте настройки и войдите через Twitch заново.');
+    AUTH.access = j.access_token; AUTH.refresh = j.refresh_token;
+    const a = ls.get('auth', null); if (a && a.cid === AUTH.cid) ls.set('auth', { ...a, refresh: AUTH.refresh });
     clearTimeout(AUTH.timer);
     AUTH.timer = setTimeout(() => refreshAccess().catch(e => warn(e.message)), Math.max(60, (j.expires_in || 14400) - 600) * 1000);
     return AUTH.access;
@@ -350,39 +341,37 @@ const S = {
 async function playerMode() {
   $('overlay').style.display = 'block';
   if (hashParams.get('video') === '1') $('ytwrap').classList.add('show');
-  S.rq = hashParams.get('rq') || hashParams.get('reward'); S.ru = hashParams.get('ru'); S.rs = hashParams.get('rs');
-  S.pls = (hashParams.get('pls') || '').split('|').filter(Boolean).map(x => { const [n, id] = x.split('~'); return { n, id }; });
-  if (!S.pls.length && hashParams.get('pl')) S.pls = [{ n: 'Плейлист', id: hashParams.get('pl') }];
+  const cfg = ls.get('setup', {}), auth = ls.get('auth', null);
+  S.pls = cfg.pls || [];
   const lastPl = ls.get('activePl', null);
-  S.pl = S.pls.find(x => x.id === lastPl) || S.pls[parseInt(hashParams.get('def')) || 0] || S.pls[0] || null;
-  S.maxSec = (parseFloat(hashParams.get('max')) || 6) * 60;
-  S.minViews = hashParams.has('views') ? parseInt(hashParams.get('views')) || 0 : 10000;
-  S.ytKey = hashParams.get('ytkey') || '';
-  S.perUser = parseInt(hashParams.get('per')) || 2;
-  S.volume = ls.get('vol', parseInt(hashParams.get('vol')) || 40);
+  S.pl = S.pls.find(x => x.id === lastPl) || S.pls[cfg.def || 0] || S.pls[0] || null;
+  S.maxSec = (parseFloat(cfg.max) || 6) * 60;
+  S.minViews = cfg.views !== undefined && cfg.views !== '' ? parseInt(cfg.views) || 0 : 10000;
+  S.ytKey = cfg.ytkey || '';
+  S.perUser = parseInt(cfg.per) || 2;
+  S.volume = ls.get('vol', parseInt(cfg.vol) || 40);
 
-  try {
-    let token, v;
-    const seed = hashParams.get('seed');
-    if (seed) {
-      AUTH.cid = hashParams.get('cid'); AUTH.key = 'rt_' + seed.slice(0, 20);
-      AUTH.refresh = ls.get(AUTH.key, seed);
-      token = await refreshAccess();
-      v = await validate(token);
-      S.tw = twitchApi(() => AUTH.access, AUTH.cid, refreshAccess);
-    } else {                                           // старые ссылки
-      token = hashParams.get('token'); v = await validate(token);
-      S.tw = twitchApi(token, v.client_id);
-      if (v.expires_in < 3 * 86400) warn(`Ключ Twitch истекает через ${Math.max(0, Math.round(v.expires_in / 3600))} ч. — пройдите настройку заново.`);
-    }
+  // Настройки меняются в доке или по ⚙ — перезапускаемся сами
+  const ident = () => JSON.stringify([ls.get('setup', {}), (ls.get('auth', null) || {}).login, (ls.get('auth', null) || {}).cid]);
+  const snap = ident();
+  const check = () => { if (!document.body.classList.contains('cfg') && ident() !== snap) location.reload(); };
+  setInterval(check, 3000); window.addEventListener('storage', check);
+  $('gear').onclick = () => { document.body.classList.add('cfg'); };
+  $('s-close').style.display = 'block';
+  $('s-close').onclick = () => { document.body.classList.remove('cfg'); check(); };
+  setupMode(true);
+
+  if (!auth) warn('Не выполнен вход в Twitch. Откройте настройки (⚙ или док-панель) и нажмите «Войти через Twitch».');
+  else try {
+    AUTH.cid = auth.cid; AUTH.refresh = auth.refresh;
+    await refreshAccess();
+    const v = await validate(AUTH.access);
+    S.tw = twitchApi(() => AUTH.access, AUTH.cid, refreshAccess);
     S.me = { id: v.user_id, login: v.login };
-    if (hashParams.has('t1')) {                        // награды берём из настроек в ссылке
-      const g = k => hashParams.get(k) || '';
-      try {
-        const [rq, ru, rs] = await ensureRewards(S.tw, S.me.id, rewardSpecs({ title: g('t1'), cost: g('c1'), utitle: g('t2'), ucost: g('c2'), stitle: g('t3'), scost: g('c3') }));
-        S.rq = rq.id; S.ru = ru.id; S.rs = rs.id;
-      } catch (e) { warn('Награды: ' + e.message); }
-    }
+    try {
+      const [rq, ru, rs] = await ensureRewards(S.tw, S.me.id, rewardSpecs(cfg));
+      S.rq = rq.id; S.ru = ru.id; S.rs = rs.id;
+    } catch (e) { warn('Награды: ' + e.message); }
     connectEventSub();
     loadMods(); setInterval(loadMods, 5 * 60 * 1000);
   } catch (e) { warn(e.message); }
@@ -718,7 +707,7 @@ function hideWarn() { $('warn').style.display = 'none'; }
 // экспорт для тестов
 window.__mp = { switchPlaylist, isoDur, extractVideoId, extractPlaylistId, S, onRedemption, onChat, next };
 
-if (hashParams.get('token') || hashParams.get('seed')) playerMode(); else setupMode();
+if (location.hash === '#obs') playerMode(); else setupMode();
 </script>
 </body>
 </html>
