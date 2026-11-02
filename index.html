@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>iLen1n Music</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { --bg: rgba(14,14,20,.82); --fg: #fff; --muted: #b9b9c8; --acc: #9147ff; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; font-family: "Segoe UI", Roboto, Arial, sans-serif; color: var(--fg); }
+
+  /* ---------- оверлей ---------- */
+  #overlay { display: none; padding: 12px; }
+  .card { display: flex; gap: 12px; align-items: center; background: var(--bg); border-radius: 14px; padding: 10px 14px; width: 460px; border-left: 4px solid var(--acc); transition: opacity .4s; }
+  .card.hidden { opacity: 0; }
+  .card img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; flex: none; }
+  .meta { min-width: 0; flex: 1; }
+  .title { font-weight: 700; font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  .req { font-size: 13px; color: #d4b8ff; margin-top: 2px; }
+  .bar { height: 4px; background: rgba(255,255,255,.15); border-radius: 2px; margin-top: 7px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--acc); }
+  #queue { margin-top: 6px; width: 460px; font-size: 13px; }
+  #queue div { background: var(--bg); border-radius: 8px; padding: 5px 10px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #warn { margin-top: 6px; font-size: 12px; color: #ffb4b4; background: var(--bg); border-radius: 8px; padding: 4px 10px; display: none; width: 460px; }
+  #ytwrap { position: fixed; right: 0; bottom: 0; width: 320px; height: 180px; opacity: 0; pointer-events: none; }
+  #ytwrap.show { opacity: 1; position: static; margin-top: 8px; }
+  #lister { position: fixed; left: -9999px; top: 0; width: 200px; height: 200px; }
+
+  /* ---------- настройка ---------- */
+  #setup { display: none; max-width: 640px; margin: 30px auto; padding: 24px; background: #18181f; border-radius: 16px; line-height: 1.5; }
+  #setup h1 { margin-top: 0; font-size: 22px; }
+  #setup label { display: block; margin-top: 12px; font-size: 14px; color: var(--muted); }
+  #setup input { width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid #333; background: #0e0e14; color: #fff; font-size: 15px; margin-top: 4px; }
+  #setup button { margin-top: 18px; padding: 11px 18px; border: 0; border-radius: 9px; background: var(--acc); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }
+  #setup code, #setup textarea { background: #0e0e14; border-radius: 6px; padding: 2px 6px; color: #d4b8ff; }
+  #setup textarea { width: 100%; height: 110px; padding: 10px; border: 1px solid #333; font-size: 13px; }
+  .row { display: flex; gap: 12px; } .row > div { flex: 1; }
+  .ok { color: #8ef0a8; } .err { color: #ff9b9b; }
+  small { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<!-- ===== Режим настройки (открывается в обычном браузере) ===== -->
+<div id="setup">
+  <h1>🎵 Плеер для заказа музыки</h1>
+  <div id="s-step1">
+    <p>1. Создайте приложение на <a href="https://dev.twitch.tv/console/apps" target="_blank" style="color:#d4b8ff">dev.twitch.tv/console/apps</a>. В поле <b>OAuth Redirect URLs</b> вставьте ровно этот адрес:<br><code id="s-redirect"></code></p>
+    <label>Client ID приложения
+      <input id="s-client" placeholder="например 3x8ab1c2d3e4f5..." autocomplete="off"></label>
+    <label>ID плейлиста YouTube Music (фоновая музыка)
+      <input id="s-pl" value="PLJa2zpLICsN0"></label>
+    <div class="row">
+      <div><label>Название награды
+        <input id="s-title" value="🎵 Заказать трек"></label></div>
+      <div><label>Цена в баллах
+        <input id="s-cost" type="number" value="500"></label></div>
+    </div>
+    <div class="row">
+      <div><label>Макс. длина трека, мин
+        <input id="s-max" type="number" value="7"></label></div>
+      <div><label>Заказов в очереди на человека
+        <input id="s-per" type="number" value="2"></label></div>
+      <div><label>Громкость, %
+        <input id="s-vol" type="number" value="40"></label></div>
+    </div>
+    <button id="s-login">Войти через Twitch</button>
+  </div>
+  <div id="s-step2" style="display:none">
+    <p id="s-status">Проверяю вход…</p>
+    <div id="s-done" style="display:none">
+      <p>2. Скопируйте этот адрес и вставьте в OBS: <b>Источник → Браузер → URL</b>. Ширина 500, высота 400. Включите «Управлять звуком через OBS».</p>
+      <textarea id="s-url" readonly></textarea>
+      <p><small>⚠️ В адресе лежит ваш ключ Twitch. Не показывайте его на стриме и никому не отправляйте.</small></p>
+      <button id="s-copy">Скопировать</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Режим плеера (OBS) ===== -->
+<div id="overlay">
+  <div class="card hidden" id="card">
+    <img id="thumb" alt="">
+    <div class="meta">
+      <div class="title" id="t-title">—</div>
+      <div class="sub" id="t-sub"></div>
+      <div class="req" id="t-req"></div>
+      <div class="bar"><i id="t-bar"></i></div>
+    </div>
+  </div>
+  <div id="queue"></div>
+  <div id="warn"></div>
+  <div id="ytwrap"><div id="yt"></div></div>
+</div>
+<div id="lister"><div id="lister-yt"></div></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const PAGE = location.origin + location.pathname;
+const hashParams = new URLSearchParams(location.hash.slice(1));
+const ls = { get(k, d) { try { const v = localStorage.getItem('mp_' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+             set(k, v) { try { localStorage.setItem('mp_' + k, JSON.stringify(v)); } catch {} } };
+
+/* =========================================================
+   РЕЖИМ НАСТРОЙКИ
+   ========================================================= */
+async function setupMode() {
+  $('setup').style.display = 'block';
+  $('s-redirect').textContent = PAGE;
+  const saved = ls.get('setup', {});
+  for (const k of ['client', 'pl', 'title', 'cost', 'max', 'per', 'vol']) if (saved[k] != null) $('s-' + k).value = saved[k];
+
+  $('s-login').onclick = () => {
+    const cfg = {}; for (const k of ['client', 'pl', 'title', 'cost', 'max', 'per', 'vol']) cfg[k] = $('s-' + k).value.trim();
+    if (!cfg.client) return alert('Вставьте Client ID');
+    cfg.pl = extractPlaylistId(cfg.pl) || cfg.pl;
+    ls.set('setup', cfg);
+    const scopes = ['channel:manage:redemptions', 'channel:read:redemptions', 'user:read:chat', 'user:write:chat'];
+    location.href = 'https://id.twitch.tv/oauth2/authorize?response_type=token&force_verify=true'
+      + '&client_id=' + encodeURIComponent(cfg.client)
+      + '&redirect_uri=' + encodeURIComponent(PAGE)
+      + '&scope=' + encodeURIComponent(scopes.join(' '));
+  };
+
+  const token = hashParams.get('access_token');
+  if (!token) return;
+  history.replaceState(null, '', PAGE);
+  $('s-step1').style.display = 'none'; $('s-step2').style.display = 'block';
+  const cfg = ls.get('setup', {});
+  try {
+    const v = await validate(token);
+    const tw = twitchApi(token, v.client_id);
+    const reward = await ensureReward(tw, v.user_id, cfg);
+    const p = new URLSearchParams({ token, pl: cfg.pl, reward: reward.id, max: cfg.max, per: cfg.per, vol: cfg.vol });
+    $('s-url').value = PAGE + '#' + p.toString();
+    $('s-status').innerHTML = `<span class="ok">✅ Вход выполнен как <b>${esc(v.login)}</b>. Награда «${esc(reward.title)}» за ${reward.cost} баллов готова.</span><br><small>Ключ действует примерно ${Math.round(v.expires_in / 86400)} дн., потом откройте эту страницу и войдите заново.</small>`;
+    $('s-done').style.display = 'block';
+    $('s-copy').onclick = () => { $('s-url').select(); navigator.clipboard?.writeText($('s-url').value); $('s-copy').textContent = 'Скопировано ✓'; };
+  } catch (e) {
+    $('s-status').innerHTML = `<span class="err">Ошибка: ${esc(e.message)}</span>`;
+  }
+}
+
+async function ensureReward(tw, uid, cfg) {
+  const mine = await tw('GET', `channel_points/custom_rewards?broadcaster_id=${uid}&only_manageable_rewards=true`);
+  const body = {
+    title: cfg.title || '🎵 Заказать трек',
+    cost: Math.max(1, parseInt(cfg.cost) || 500),
+    prompt: 'Вставьте ссылку на YouTube или YouTube Music. Длинные, недоступные и неверные ссылки — баллы вернутся.',
+    is_user_input_required: true,
+    should_redemptions_skip_request_queue: false,
+    is_enabled: true,
+  };
+  const existing = (mine.data || [])[0];
+  if (existing) return (await tw('PATCH', `channel_points/custom_rewards?broadcaster_id=${uid}&id=${existing.id}`, body)).data[0];
+  try {
+    return (await tw('POST', `channel_points/custom_rewards?broadcaster_id=${uid}`, body)).data[0];
+  } catch (e) {
+    if (/DUPLICATE/i.test(e.message)) throw new Error(`На канале уже есть награда «${body.title}», созданная вручную. Удалите её или впишите другое название.`);
+    if (/partner or affiliate/i.test(e.message)) throw new Error('Награды за баллы доступны только компаньонам и партнёрам Twitch.');
+    throw e;
+  }
+}
+
+/* =========================================================
+   TWITCH
+   ========================================================= */
+async function validate(token) {
+  const r = await fetch('https://id.twitch.tv/oauth2/validate', { headers: { Authorization: 'OAuth ' + token } });
+  if (!r.ok) throw new Error('Ключ Twitch недействителен или истёк. Откройте страницу настройки и войдите снова.');
+  return r.json();
+}
+function twitchApi(token, clientId) {
+  return async (method, path, body) => {
+    const r = await fetch('https://api.twitch.tv/helix/' + path, {
+      method, headers: { Authorization: 'Bearer ' + token, 'Client-Id': clientId, 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (r.status === 204) return {};
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(`${r.status} ${j.message || j.error || ''}`.trim());
+    return j;
+  };
+}
+
+/* =========================================================
+   РЕЖИМ ПЛЕЕРА
+   ========================================================= */
+const S = {
+  tw: null, me: null, rewardId: null,
+  maxSec: 420, perUser: 2, volume: 40, plId: null,
+  queue: ls.get('queue', []),        // [{vid, user, userId, redemptionId}]
+  bg: [], bgPos: 0,                  // фоновый плейлист
+  current: null,                     // {vid, user?, redemptionId?, checked}
+  player: null, ready: false,
+};
+
+async function playerMode() {
+  $('overlay').style.display = 'block';
+  if (hashParams.get('video') === '1') $('ytwrap').classList.add('show');
+  const token = hashParams.get('token');
+  S.rewardId = hashParams.get('reward');
+  S.plId = hashParams.get('pl');
+  S.maxSec = (parseFloat(hashParams.get('max')) || 7) * 60;
+  S.perUser = parseInt(hashParams.get('per')) || 2;
+  S.volume = ls.get('vol', parseInt(hashParams.get('vol')) || 40);
+
+  try {
+    const v = await validate(token);
+    S.me = { id: v.user_id, login: v.login };
+    S.tw = twitchApi(token, v.client_id);
+    if (v.expires_in < 3 * 86400) warn(`Ключ Twitch истекает через ${Math.max(0, Math.round(v.expires_in / 3600))} ч. — пройдите настройку заново.`);
+    connectEventSub(token, v.client_id);
+  } catch (e) { warn(e.message); }
+
+  await loadYT();
+  S.bg = shuffle(await fetchPlaylistIds(S.plId));
+  if (!S.bg.length) warn('Не удалось загрузить фоновый плейлист. Он должен быть «Доступ по ссылке» или открытым.');
+  S.player = new YT.Player('yt', {
+    width: 320, height: 180,
+    playerVars: { autoplay: 1, controls: 0, disablekb: 1, playsinline: 1, rel: 0, origin: location.origin },
+    events: {
+      onReady: () => { S.ready = true; S.player.setVolume(S.volume); next(); },
+      onStateChange: onState,
+      onError: onYTError,
+    },
+  });
+  setInterval(tick, 500);
+}
+
+function next() {
+  if (!S.ready) return;
+  let item = S.queue.shift();
+  saveQueue();
+  if (!item) {
+    if (!S.bg.length) { S.current = null; renderCard(); return; }
+    if (S.bgPos >= S.bg.length) { S.bg = shuffle(S.bg); S.bgPos = 0; }
+    item = { vid: S.bg[S.bgPos++] };
+  }
+  S.current = { ...item, checked: false };
+  S.player.loadVideoById(item.vid);
+  renderQueue();
+}
+
+function onState(e) {
+  if (e.data === YT.PlayerState.ENDED) return next();
+  if (e.data === YT.PlayerState.PLAYING && S.current && !S.current.checked) {
+    S.current.checked = true;
+    const dur = S.player.getDuration();
+    if (S.current.redemptionId) {
+      if (dur > S.maxSec + 5) {
+        resolveRedemption(S.current, false);
+        say(`@${S.current.user}, трек длиннее ${Math.round(S.maxSec / 60)} мин — баллы вернул.`);
+        return next();
+      }
+      resolveRedemption(S.current, true);
+      const d = S.player.getVideoData();
+      say(`▶️ Сейчас играет заказ от @${S.current.user}: ${d.title}`);
+    }
+    renderCard();
+  }
+}
+
+function onYTError(e) {
+  const cur = S.current;
+  if (cur && cur.redemptionId) {
+    resolveRedemption(cur, false);
+    say(`@${cur.user}, это видео нельзя проиграть (удалено или запрещено к встраиванию) — баллы вернул.`);
+  } else if (cur) {
+    S.bg = S.bg.filter(v => v !== cur.vid);   // выкидываем битый трек из фона
+  }
+  setTimeout(next, 500);
+}
+
+function tick() {
+  if (!S.ready || !S.current) return;
+  const d = S.player.getDuration(), t = S.player.getCurrentTime();
+  $('t-bar').style.width = d ? Math.min(100, t / d * 100) + '%' : '0';
+}
+
+function renderCard() {
+  const c = S.current;
+  if (!c || !S.ready) { $('card').classList.add('hidden'); return; }
+  const d = S.player.getVideoData() || {};
+  $('thumb').src = `https://i.ytimg.com/vi/${c.vid}/mqdefault.jpg`;
+  $('t-title').textContent = cleanTitle(d.title || '…');
+  $('t-sub').textContent = (d.author || '').replace(/ - Topic$/, '');
+  $('t-req').textContent = c.user ? `🎁 заказал(а) ${c.user}` : '';
+  $('card').classList.remove('hidden');
+}
+
+function renderQueue() {
+  $('queue').innerHTML = S.queue.slice(0, 3).map((q, i) => `<div>${i + 1}. ${esc(q.title || 'youtu.be/' + q.vid)} — <span style="color:#d4b8ff">${esc(q.user)}</span></div>`).join('')
+    + (S.queue.length > 3 ? `<div>…и ещё ${S.queue.length - 3}</div>` : '');
+}
+function saveQueue() { ls.set('queue', S.queue); }
+
+/* ---------- заказы ---------- */
+async function onRedemption(ev) {
+  if (S.rewardId && ev.reward.id !== S.rewardId) return;
+  const user = ev.user_name, input = (ev.user_input || '').trim();
+  const r = { redemptionId: ev.id, rewardId: ev.reward.id, user, userId: ev.user_id };
+  const vid = extractVideoId(input);
+  if (!vid) { resolveRedemption(r, false); return say(`@${user}, нужна ссылка на YouTube или YouTube Music — баллы вернул.`); }
+  if (S.queue.filter(q => q.userId === ev.user_id).length >= S.perUser) {
+    resolveRedemption(r, false); return say(`@${user}, у тебя уже ${S.perUser} трека в очереди — баллы вернул, закажи чуть позже.`);
+  }
+  if (S.queue.some(q => q.vid === vid) || (S.current && S.current.vid === vid)) {
+    resolveRedemption(r, false); return say(`@${user}, этот трек уже в очереди — баллы вернул.`);
+  }
+  const title = await fetchTitle(vid);
+  S.queue.push({ ...r, vid, title });
+  saveQueue(); renderQueue();
+  say(`@${user}, добавил: ${title || vid} — в очереди ${S.queue.length}-м.`);
+}
+
+async function resolveRedemption(r, ok) {
+  if (!S.tw || !r.redemptionId) return;
+  try {
+    await S.tw('PATCH', `channel_points/custom_rewards/redemptions?broadcaster_id=${S.me.id}&reward_id=${r.rewardId || S.rewardId}&id=${r.redemptionId}`,
+      { status: ok ? 'FULFILLED' : 'CANCELED' });
+  } catch (e) { console.warn('redemption', e); }
+}
+
+/* ---------- команды чата ---------- */
+function onChat(ev) {
+  const text = (ev.message?.text || '').trim();
+  if (!text.startsWith('!')) return;
+  const [cmd, arg] = text.split(/\s+/, 2);
+  const badges = (ev.badges || []).map(b => b.set_id);
+  const isMod = badges.includes('broadcaster') || badges.includes('moderator') || ev.chatter_user_id === S.me.id;
+  switch (cmd.toLowerCase()) {
+    case '!song': case '!трек': {
+      const d = S.player?.getVideoData?.() || {};
+      return say(d.title ? `🎵 ${d.title} — https://youtu.be/${S.current.vid}` : 'Сейчас ничего не играет');
+    }
+    case '!queue': case '!очередь':
+      return say(S.queue.length ? 'Очередь: ' + S.queue.slice(0, 5).map((q, i) => `${i + 1}) ${q.title || q.vid} (${q.user})`).join(' | ') : 'Очередь пуста, играет плейлист стримера.');
+    case '!skip': case '!скип':
+      if (isMod) { next(); } return;
+    case '!vol': case '!громкость': {
+      if (!isMod) return;
+      const n = Math.max(0, Math.min(100, parseInt(arg)));
+      if (isNaN(n)) return say(`Громкость: ${S.volume}%`);
+      S.volume = n; ls.set('vol', n); S.player?.setVolume(n); return say(`Громкость: ${n}%`);
+    }
+    case '!pause': case '!пауза': if (isMod) S.player?.pauseVideo(); return;
+    case '!play': case '!плей': if (isMod) S.player?.playVideo(); return;
+    case '!clearqueue': case '!очистить':
+      if (!isMod) return;
+      S.queue.forEach(q => resolveRedemption(q, false));
+      S.queue = []; saveQueue(); renderQueue(); return say('Очередь очищена, баллы вернул.');
+  }
+}
+
+let sayBusy = Promise.resolve();
+function say(message) {
+  if (!S.tw) return;
+  sayBusy = sayBusy.then(() => S.tw('POST', 'chat/messages', { broadcaster_id: S.me.id, sender_id: S.me.id, message: message.slice(0, 480) }).catch(e => console.warn('chat', e)));
+}
+
+/* ---------- EventSub WebSocket ---------- */
+function connectEventSub(token, clientId, url = 'wss://eventsub.wss.twitch.tv/ws', isReconnect = false) {
+  const ws = new WebSocket(url);
+  let keepalive = 30, timer = null;
+  const arm = () => { clearTimeout(timer); timer = setTimeout(() => { ws.close(); }, (keepalive + 10) * 1000); };
+  ws.onmessage = async (m) => {
+    arm();
+    const msg = JSON.parse(m.data), type = msg.metadata.message_type;
+    if (type === 'session_welcome') {
+      keepalive = msg.payload.session.keepalive_timeout_seconds || 30; arm();
+      if (isReconnect) return;
+      const sid = msg.payload.session.id, transport = { method: 'websocket', session_id: sid };
+      try {
+        const cond = { broadcaster_user_id: S.me.id }; if (S.rewardId) cond.reward_id = S.rewardId;
+        await S.tw('POST', 'eventsub/subscriptions', { type: 'channel.channel_points_custom_reward_redemption.add', version: '1', condition: cond, transport });
+        await S.tw('POST', 'eventsub/subscriptions', { type: 'channel.chat.message', version: '1', condition: { broadcaster_user_id: S.me.id, user_id: S.me.id }, transport });
+        hideWarn();
+      } catch (e) { warn('Twitch-подписка не создалась: ' + e.message); }
+    } else if (type === 'session_reconnect') {
+      const nu = msg.payload.session.reconnect_url;
+      const old = ws; old.onclose = null; clearTimeout(timer);
+      connectEventSub(token, clientId, nu, true);
+      setTimeout(() => old.close(), 2000);
+    } else if (type === 'notification') {
+      const t = msg.metadata.subscription_type, ev = msg.payload.event;
+      if (t === 'channel.channel_points_custom_reward_redemption.add') onRedemption(ev);
+      if (t === 'channel.chat.message') onChat(ev);
+    } else if (type === 'revocation') {
+      warn('Twitch отозвал доступ: ' + msg.payload.subscription.status + '. Пройдите настройку заново.');
+    }
+  };
+  ws.onclose = () => { clearTimeout(timer); warn('Нет связи с Twitch, переподключаюсь…'); setTimeout(() => connectEventSub(token, clientId), 5000); };
+}
+
+/* ---------- YouTube ---------- */
+function loadYT() {
+  return new Promise(res => {
+    window.onYouTubeIframeAPIReady = res;
+    const s = document.createElement('script'); s.src = 'https://www.youtube.com/iframe_api'; document.head.appendChild(s);
+  });
+}
+
+// Достаём список ID видео из плейлиста через скрытый плеер (без API-ключа).
+function fetchPlaylistIds(list) {
+  return new Promise(resolve => {
+    if (!list) return resolve([]);
+    const ids = new Set(); let lastSize = -1, idx = 0, done = false;
+    const finish = () => { if (!done) { done = true; try { p.destroy(); } catch {} resolve([...ids]); } };
+    setTimeout(finish, 20000);
+    const p = new YT.Player('lister-yt', {
+      width: 200, height: 200, playerVars: { autoplay: 0, origin: location.origin },
+      events: {
+        onReady: () => p.cuePlaylist({ listType: 'playlist', list, index: 0 }),
+        onStateChange: e => {
+          if (e.data !== YT.PlayerState.CUED) return;
+          (p.getPlaylist() || []).forEach(v => ids.add(v));
+          if (ids.size === lastSize || ids.size < 199 + idx) return finish();
+          lastSize = ids.size; idx = ids.size;
+          p.cuePlaylist({ listType: 'playlist', list, index: idx });
+        },
+        onError: finish,
+      },
+    });
+  });
+}
+
+async function fetchTitle(vid) {
+  try {
+    const r = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent('https://www.youtube.com/watch?v=' + vid)}`);
+    if (r.ok) return cleanTitle((await r.json()).title);
+  } catch {}
+  return '';
+}
+
+/* ---------- утилиты ---------- */
+function extractVideoId(s) {
+  if (!s) return null;
+  const m = s.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:[^#\s]*&)?v=|shorts\/|embed\/|live\/|v\/))([A-Za-z0-9_-]{11})/i);
+  return m ? m[1] : null;
+}
+function extractPlaylistId(s) { const m = (s || '').match(/[?&]list=([A-Za-z0-9_-]+)/); return m ? m[1] : null; }
+function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+function cleanTitle(t) { return (t || '').replace(/\s*[\[(](official|official video|official audio|lyric[s]? video|audio|клип|премьера)[^\])]*[\])]/gi, '').trim(); }
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function warn(t) { $('warn').textContent = '⚠️ ' + t; $('warn').style.display = 'block'; }
+function hideWarn() { $('warn').style.display = 'none'; }
+
+// экспорт для тестов
+window.__mp = { extractVideoId, extractPlaylistId, S, onRedemption, onChat, next };
+
+if (hashParams.get('token')) playerMode(); else setupMode();
+</script>
+</body>
+</html>
