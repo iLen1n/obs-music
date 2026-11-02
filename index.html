@@ -106,7 +106,7 @@
   </div>
   <div id="s-step2">
     <p id="s-status"></p>
-    <p><small style="opacity:.6">версия 5 · плеер: #obs</small></p>
+    <p><small style="opacity:.6">версия 6 · плеер: #obs</small></p>
     <div id="s-done">
       <p><b>Плеер в OBS:</b> Источник → Браузер, адрес <code>https://ilen1n.github.io/obs-music/#obs</code>, ширина 500, высота 400, включите «Управлять звуком через OBS». Адрес постоянный — менять его не нужно. Всё, что вы сохраните здесь, плеер применит сам через пару секунд.</p>
     </div>
@@ -343,6 +343,7 @@ async function playerMode() {
   $('overlay').style.display = 'block';
   if (hashParams.get('video') === '1') $('ytwrap').classList.add('show');
   const cfg = ls.get('setup', {}), auth = ls.get('auth', null);
+  if (!cfg.pls) warn('Плеер не видит настроек. Если вы сохраняли их в док-панели, значит, OBS хранит данные панели и источника раздельно. Настройте прямо здесь: правой кнопкой по источнику → «Взаимодействовать» → наведите мышь в правый верхний угол → ⚙.');
   S.pls = cfg.pls || [];
   const lastPl = ls.get('activePl', null);
   S.pl = S.pls.find(x => x.id === lastPl) || S.pls[cfg.def || 0] || S.pls[0] || null;
@@ -362,7 +363,7 @@ async function playerMode() {
   $('s-close').onclick = () => { document.body.classList.remove('cfg'); check(); };
   setupMode(true);
 
-  if (!auth) warn('Не выполнен вход в Twitch. Откройте настройки (⚙ или док-панель) и нажмите «Войти через Twitch».');
+  if (!auth && cfg.pls) warn('Не выполнен вход в Twitch. Откройте настройки (⚙) и нажмите «Войти через Twitch».');
   else try {
     AUTH.cid = auth.cid; AUTH.refresh = auth.refresh;
     await refreshAccess();
@@ -379,7 +380,7 @@ async function playerMode() {
 
   await loadYT();
   S.bg = shuffle(await fetchPlaylistIds(S.pl?.id));
-  if (!S.bg.length) warn(`Не удалось загрузить фоновый плейлист «${S.pl?.n || ''}». Он должен быть «Доступ по ссылке» или открытым.${S.plError ? ' YouTube: ' + S.plError : ''}`);
+  if (!S.bg.length && S.pl) warn(`Не удалось загрузить фоновый плейлист «${S.pl?.n || ''}». Он должен быть «Доступ по ссылке» или открытым.${S.plError ? ' YouTube: ' + S.plError : ''}`);
   S.player = new YT.Player('yt', {
     width: 320, height: 180,
     playerVars: { autoplay: 1, controls: 0, disablekb: 1, playsinline: 1, rel: 0, origin: location.origin },
@@ -702,8 +703,10 @@ function extractPlaylistId(s) { const m = (s || '').match(/[?&]list=([A-Za-z0-9_
 function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 function cleanTitle(t) { return (t || '').replace(/\s*[\[(](official|official video|official audio|lyric[s]? video|audio|клип|премьера)[^\])]*[\])]/gi, '').trim(); }
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-function warn(t) { $('warn').textContent = '⚠️ ' + t; $('warn').style.display = 'block'; }
-function hideWarn() { $('warn').style.display = 'none'; }
+const WARNS = new Map();
+function drawWarns() { $('warn').innerHTML = [...WARNS.values()].map(t => '⚠️ ' + esc(t)).join('<br>'); $('warn').style.display = WARNS.size ? 'block' : 'none'; }
+function warn(t, key = t) { if (/связи с Twitch/.test(t)) key = 'conn'; WARNS.set(key, t); drawWarns(); }
+function hideWarn(key = 'conn') { WARNS.delete(key); drawWarns(); }
 
 // экспорт для тестов
 window.__mp = { switchPlaylist, isoDur, extractVideoId, extractPlaylistId, S, onRedemption, onChat, next };
