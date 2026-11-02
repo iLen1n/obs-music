@@ -52,10 +52,22 @@
     <label>ID плейлиста YouTube Music (фоновая музыка)
       <input id="s-pl" value="PLJa2zpLICsN0"></label>
     <div class="row">
-      <div><label>Название награды
-        <input id="s-title" value="🎵 Заказать трек"></label></div>
-      <div><label>Цена в баллах
-        <input id="s-cost" type="number" value="500"></label></div>
+      <div><label>Награда «заказ»
+        <input id="s-title" value="Музыка"></label></div>
+      <div><label>Цена
+        <input id="s-cost" type="number" value="50"></label></div>
+    </div>
+    <div class="row">
+      <div><label>Награда «без очереди»
+        <input id="s-utitle" value="Срочно музыка"></label></div>
+      <div><label>Цена
+        <input id="s-ucost" type="number" value="150"></label></div>
+    </div>
+    <div class="row">
+      <div><label>Награда «скип»
+        <input id="s-stitle" value="Скип музыки"></label></div>
+      <div><label>Цена
+        <input id="s-scost" type="number" value="300"></label></div>
     </div>
     <div class="row">
       <div><label>Макс. длина трека, мин
@@ -110,10 +122,11 @@ async function setupMode() {
   $('setup').style.display = 'block';
   $('s-redirect').textContent = PAGE;
   const saved = ls.get('setup', {});
-  for (const k of ['client', 'pl', 'title', 'cost', 'max', 'per', 'vol']) if (saved[k] != null) $('s-' + k).value = saved[k];
+  const KEYS = ['client', 'pl', 'title', 'cost', 'utitle', 'ucost', 'stitle', 'scost', 'max', 'per', 'vol'];
+  for (const k of KEYS) if (saved[k] != null) $('s-' + k).value = saved[k];
 
   $('s-login').onclick = () => {
-    const cfg = {}; for (const k of ['client', 'pl', 'title', 'cost', 'max', 'per', 'vol']) cfg[k] = $('s-' + k).value.trim();
+    const cfg = {}; for (const k of KEYS) cfg[k] = $('s-' + k).value.trim();
     if (!cfg.client) return alert('Вставьте Client ID');
     cfg.pl = extractPlaylistId(cfg.pl) || cfg.pl;
     ls.set('setup', cfg);
@@ -132,10 +145,15 @@ async function setupMode() {
   try {
     const v = await validate(token);
     const tw = twitchApi(token, v.client_id);
-    const reward = await ensureReward(tw, v.user_id, cfg);
-    const p = new URLSearchParams({ token, pl: cfg.pl, reward: reward.id, max: cfg.max, per: cfg.per, vol: cfg.vol });
+    const linkPrompt = 'Вставьте ссылку на YouTube или YouTube Music. Неверная ссылка, трек длиннее лимита или недоступное видео — баллы вернутся.';
+    const [rq, ru, rs] = await ensureRewards(tw, v.user_id, [
+      { title: cfg.title || 'Музыка', cost: cfg.cost || 50, prompt: linkPrompt, is_user_input_required: true },
+      { title: cfg.utitle || 'Срочно музыка', cost: cfg.ucost || 150, prompt: 'Трек без очереди: играет сразу после текущего заказа (фоновую музыку прерывает). ' + linkPrompt, is_user_input_required: true },
+      { title: cfg.stitle || 'Скип музыки', cost: cfg.scost || 300, prompt: 'Пропустить трек, который сейчас играет.', is_user_input_required: false },
+    ]);
+    const p = new URLSearchParams({ token, pl: cfg.pl, rq: rq.id, ru: ru.id, rs: rs.id, max: cfg.max, per: cfg.per, vol: cfg.vol });
     $('s-url').value = PAGE + '#' + p.toString();
-    $('s-status').innerHTML = `<span class="ok">✅ Вход выполнен как <b>${esc(v.login)}</b>. Награда «${esc(reward.title)}» за ${reward.cost} баллов готова.</span><br><small>Ключ действует примерно ${Math.round(v.expires_in / 86400)} дн., потом откройте эту страницу и войдите заново.</small>`;
+    $('s-status').innerHTML = `<span class="ok">✅ Вход выполнен как <b>${esc(v.login)}</b>. Награды готовы: ${[rq, ru, rs].map(r => `«${esc(r.title)}» — ${r.cost}`).join(', ')} баллов.</span><br><small>Ключ действует примерно ${Math.round(v.expires_in / 86400)} дн., потом откройте эту страницу и войдите заново.</small>`;
     $('s-done').style.display = 'block';
     $('s-copy').onclick = () => { $('s-url').select(); navigator.clipboard?.writeText($('s-url').value); $('s-copy').textContent = 'Скопировано ✓'; };
   } catch (e) {
@@ -143,25 +161,27 @@ async function setupMode() {
   }
 }
 
-async function ensureReward(tw, uid, cfg) {
-  const mine = await tw('GET', `channel_points/custom_rewards?broadcaster_id=${uid}&only_manageable_rewards=true`);
-  const body = {
-    title: cfg.title || '🎵 Заказать трек',
-    cost: Math.max(1, parseInt(cfg.cost) || 500),
-    prompt: 'Вставьте ссылку на YouTube или YouTube Music. Длинные, недоступные и неверные ссылки — баллы вернутся.',
-    is_user_input_required: true,
-    should_redemptions_skip_request_queue: false,
-    is_enabled: true,
-  };
-  const existing = (mine.data || [])[0];
-  if (existing) return (await tw('PATCH', `channel_points/custom_rewards?broadcaster_id=${uid}&id=${existing.id}`, body)).data[0];
-  try {
-    return (await tw('POST', `channel_points/custom_rewards?broadcaster_id=${uid}`, body)).data[0];
-  } catch (e) {
-    if (/DUPLICATE/i.test(e.message)) throw new Error(`На канале уже есть награда «${body.title}», созданная вручную. Удалите её или впишите другое название.`);
-    if (/partner or affiliate/i.test(e.message)) throw new Error('Награды за баллы доступны только компаньонам и партнёрам Twitch.');
-    throw e;
+// Создаёт награды или обновляет уже созданные этой страницей (ищем по сохранённому ID, затем по названию).
+async function ensureRewards(tw, uid, specs) {
+  const mine = (await tw('GET', `channel_points/custom_rewards?broadcaster_id=${uid}&only_manageable_rewards=true`)).data || [];
+  const savedIds = ls.get('rewardIds', []);
+  const out = [];
+  for (let i = 0; i < specs.length; i++) {
+    const s = specs[i];
+    const body = { ...s, cost: Math.max(1, parseInt(s.cost) || 1), should_redemptions_skip_request_queue: false, is_enabled: true };
+    const existing = mine.find(r => r.id === savedIds[i]) || mine.find(r => r.title === s.title);
+    try {
+      out.push(existing
+        ? (await tw('PATCH', `channel_points/custom_rewards?broadcaster_id=${uid}&id=${existing.id}`, body)).data[0]
+        : (await tw('POST', `channel_points/custom_rewards?broadcaster_id=${uid}`, body)).data[0]);
+    } catch (e) {
+      if (/DUPLICATE/i.test(e.message)) throw new Error(`На канале уже есть награда «${s.title}», созданная вручную. Удалите её на Twitch или впишите другое название.`);
+      if (/partner or affiliate/i.test(e.message)) throw new Error('Награды за баллы доступны только компаньонам и партнёрам Twitch.');
+      throw e;
+    }
   }
+  ls.set('rewardIds', out.map(r => r.id));
+  return out;
 }
 
 /* =========================================================
@@ -189,7 +209,7 @@ function twitchApi(token, clientId) {
    РЕЖИМ ПЛЕЕРА
    ========================================================= */
 const S = {
-  tw: null, me: null, rewardId: null,
+  tw: null, me: null, rq: null, ru: null, rs: null,
   maxSec: 420, perUser: 2, volume: 40, plId: null,
   queue: ls.get('queue', []),        // [{vid, user, userId, redemptionId}]
   bg: [], bgPos: 0,                  // фоновый плейлист
@@ -201,7 +221,7 @@ async function playerMode() {
   $('overlay').style.display = 'block';
   if (hashParams.get('video') === '1') $('ytwrap').classList.add('show');
   const token = hashParams.get('token');
-  S.rewardId = hashParams.get('reward');
+  S.rq = hashParams.get('rq') || hashParams.get('reward'); S.ru = hashParams.get('ru'); S.rs = hashParams.get('rs');
   S.plId = hashParams.get('pl');
   S.maxSec = (parseFloat(hashParams.get('max')) || 7) * 60;
   S.perUser = parseInt(hashParams.get('per')) || 2;
@@ -292,17 +312,29 @@ function renderCard() {
 }
 
 function renderQueue() {
-  $('queue').innerHTML = S.queue.slice(0, 3).map((q, i) => `<div>${i + 1}. ${esc(q.title || 'youtu.be/' + q.vid)} — <span style="color:#d4b8ff">${esc(q.user)}</span></div>`).join('')
+  $('queue').innerHTML = S.queue.slice(0, 3).map((q, i) => `<div>${i + 1}. ${q.urgent ? '🚨 ' : ''}${esc(q.title || 'youtu.be/' + q.vid)} — <span style="color:#d4b8ff">${esc(q.user)}</span></div>`).join('')
     + (S.queue.length > 3 ? `<div>…и ещё ${S.queue.length - 3}</div>` : '');
 }
 function saveQueue() { ls.set('queue', S.queue); }
 
 /* ---------- заказы ---------- */
 async function onRedemption(ev) {
-  if (S.rewardId && ev.reward.id !== S.rewardId) return;
-  const user = ev.user_name, input = (ev.user_input || '').trim();
-  const r = { redemptionId: ev.id, rewardId: ev.reward.id, user, userId: ev.user_id };
-  const vid = extractVideoId(input);
+  const rid = ev.reward.id;
+  if (rid !== S.rq && rid !== S.ru && rid !== S.rs) return;
+  const user = ev.user_name;
+  const r = { redemptionId: ev.id, rewardId: rid, user, userId: ev.user_id };
+
+  if (rid === S.rs) {                                   // ---- скип
+    const cur = S.current;
+    if (!cur || !S.ready) { resolveRedemption(r, false); return say(`@${user}, сейчас ничего не играет — баллы вернул.`); }
+    resolveRedemption(r, true);
+    const t = cleanTitle(S.player.getVideoData()?.title || '');
+    say(`⏭️ @${user} скипнул трек${t ? ': ' + t : ''}`);
+    return next();
+  }
+
+  const urgent = rid === S.ru;                          // ---- заказ / срочный заказ
+  const vid = extractVideoId((ev.user_input || '').trim());
   if (!vid) { resolveRedemption(r, false); return say(`@${user}, нужна ссылка на YouTube или YouTube Music — баллы вернул.`); }
   if (S.queue.filter(q => q.userId === ev.user_id).length >= S.perUser) {
     resolveRedemption(r, false); return say(`@${user}, у тебя уже ${S.perUser} трека в очереди — баллы вернул, закажи чуть позже.`);
@@ -311,15 +343,25 @@ async function onRedemption(ev) {
     resolveRedemption(r, false); return say(`@${user}, этот трек уже в очереди — баллы вернул.`);
   }
   const title = await fetchTitle(vid);
-  S.queue.push({ ...r, vid, title });
+  const item = { ...r, vid, title, urgent };
+  if (urgent) {
+    const pos = S.queue.findIndex(q => !q.urgent);      // после других срочных, перед обычными
+    S.queue.splice(pos < 0 ? S.queue.length : pos, 0, item);
+  } else S.queue.push(item);
   saveQueue(); renderQueue();
-  say(`@${user}, добавил: ${title || vid} — в очереди ${S.queue.length}-м.`);
+  const place = S.queue.indexOf(item) + 1;
+  if (urgent && S.current && !S.current.redemptionId) {  // фон прерываем сразу
+    say(`🚨 @${user}, срочный заказ: ${title || vid} — включаю!`);
+    return next();
+  }
+  say(urgent ? `🚨 @${user}, срочный заказ: ${title || vid} — следующий после текущего трека.`
+             : `@${user}, добавил: ${title || vid} — в очереди ${place}-м.`);
 }
 
 async function resolveRedemption(r, ok) {
   if (!S.tw || !r.redemptionId) return;
   try {
-    await S.tw('PATCH', `channel_points/custom_rewards/redemptions?broadcaster_id=${S.me.id}&reward_id=${r.rewardId || S.rewardId}&id=${r.redemptionId}`,
+    await S.tw('PATCH', `channel_points/custom_rewards/redemptions?broadcaster_id=${S.me.id}&reward_id=${r.rewardId}&id=${r.redemptionId}`,
       { status: ok ? 'FULFILLED' : 'CANCELED' });
   } catch (e) { console.warn('redemption', e); }
 }
@@ -374,8 +416,7 @@ function connectEventSub(token, clientId, url = 'wss://eventsub.wss.twitch.tv/ws
       if (isReconnect) return;
       const sid = msg.payload.session.id, transport = { method: 'websocket', session_id: sid };
       try {
-        const cond = { broadcaster_user_id: S.me.id }; if (S.rewardId) cond.reward_id = S.rewardId;
-        await S.tw('POST', 'eventsub/subscriptions', { type: 'channel.channel_points_custom_reward_redemption.add', version: '1', condition: cond, transport });
+        await S.tw('POST', 'eventsub/subscriptions', { type: 'channel.channel_points_custom_reward_redemption.add', version: '1', condition: { broadcaster_user_id: S.me.id }, transport });
         await S.tw('POST', 'eventsub/subscriptions', { type: 'channel.chat.message', version: '1', condition: { broadcaster_user_id: S.me.id, user_id: S.me.id }, transport });
         hideWarn();
       } catch (e) { warn('Twitch-подписка не создалась: ' + e.message); }
