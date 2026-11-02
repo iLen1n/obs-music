@@ -155,8 +155,6 @@ async function setupMode() {
   savedPls.forEach((x, i) => addRow(x.n, 'https://music.youtube.com/playlist?list=' + x.id, i === (saved.def || 0)));
   $('s-addpl').onclick = () => addRow();
 
-  const SCOPES = ['channel:manage:redemptions', 'channel:read:redemptions', 'user:read:chat', 'user:write:chat', 'moderation:read'];
-  let session = null;   // { token, v } когда вошли
 
   // Собрать настройки из формы. null — если есть ошибка (уже показана).
   const collect = () => {
@@ -176,21 +174,17 @@ async function setupMode() {
   };
   const savedMsg = (html, cls = 'ok') => { $('s-saved').innerHTML = `<span class="${cls}">${html}</span>`; };
 
-  // Обновить награды на Twitch и собрать ссылку для OBS
-  const apply = async (cfg) => {
-    const { token, v } = session;
-    const tw = twitchApi(token, v.client_id);
-    const linkPrompt = 'Вставьте ссылку на YouTube или YouTube Music. Неверная ссылка, трек длиннее лимита или недоступное видео — баллы вернутся.';
-    const [rq, ru, rs] = await ensureRewards(tw, v.user_id, [
-      { title: cfg.title || 'Музыка', cost: cfg.cost || 50, prompt: linkPrompt, is_user_input_required: true },
-      { title: cfg.utitle || 'Срочно музыка', cost: cfg.ucost || 150, prompt: 'Трек без очереди: играет сразу после текущего заказа, раньше обычных. ' + linkPrompt, is_user_input_required: true },
-      { title: cfg.stitle || 'Скип музыки', cost: cfg.scost || 300, prompt: 'Пропустить трек, который сейчас играет.', is_user_input_required: false },
-    ]);
-    const p = new URLSearchParams({ token, pls: cfg.pls.map(x => x.n.replace(/[~|]/g, ' ') + '~' + x.id).join('|'), def: cfg.def || 0, rq: rq.id, ru: ru.id, rs: rs.id, max: cfg.max, views: cfg.views, per: cfg.per, vol: cfg.vol });
+  // Собрать ссылку для OBS из сохранённого входа и настроек
+  const buildUrl = (cfg) => {
+    const auth = ls.get('auth', null);
+    const p = new URLSearchParams({ seed: auth.seed, cid: auth.cid,
+      pls: cfg.pls.map(x => x.n.replace(/[~|]/g, ' ') + '~' + x.id).join('|'), def: cfg.def || 0,
+      t1: cfg.title, c1: cfg.cost, t2: cfg.utitle, c2: cfg.ucost, t3: cfg.stitle, c3: cfg.scost,
+      max: cfg.max, views: cfg.views, per: cfg.per, vol: cfg.vol });
     if (cfg.ytkey) p.set('ytkey', cfg.ytkey);
     $('s-url').value = PAGE + '#' + p.toString();
     $('s-copy').textContent = 'Скопировать';
-    $('s-status').innerHTML = `<span class="ok">✅ Вы вошли как <b>${esc(v.login)}</b>. Награды: ${[rq, ru, rs].map(r => `«${esc(r.title)}» — ${r.cost}`).join(', ')} баллов.</span><br><small>Вход действует примерно ${Math.round(v.expires_in / 86400)} дн., потом войдите заново.</small>`;
+    $('s-status').innerHTML = `<span class="ok">✅ Вы вошли как <b>${esc(auth.login)}</b>.</span><br><small>Вход продлевается сам, пока OBS с плеером запускается хотя бы раз в 30 дней.</small>`;
     $('s-done').style.display = 'block';
   };
 
@@ -200,47 +194,83 @@ async function setupMode() {
     if (!on) { $('s-done').style.display = 'none'; $('s-status').innerHTML = ''; }
   };
 
-  $('s-save').onclick = async () => {
+  $('s-save').onclick = () => {
     const cfg = collect(); if (!cfg) return;
     ls.set('setup', cfg);
     const plInfo = `Плейлистов: ${cfg.pls.length} (${cfg.pls.map(x => '«' + esc(x.n) + '»').join(', ')}).`;
-    if (!session) return savedMsg(`✅ Сохранено. ${plInfo} Войдите через Twitch, чтобы получить ссылку для OBS.`);
-    savedMsg('Сохраняю…', '');
-    try { await apply(cfg); savedMsg(`✅ Сохранено. ${plInfo} Ссылка для OBS обновлена ниже — вставьте новую в OBS.`); }
-    catch (e) { savedMsg('Ошибка: ' + esc(e.message), 'err'); }
+    if (!ls.get('auth', null)) return savedMsg(`✅ Сохранено. ${plInfo} Войдите через Twitch, чтобы получить ссылку для OBS.`);
+    buildUrl(cfg);
+    savedMsg(`✅ Сохранено. ${plInfo} Ссылка для OBS обновлена ниже — замените её в OBS. Награды обновятся, когда OBS загрузит новую ссылку.`);
   };
 
   $('s-copy').onclick = () => { $('s-url').select(); navigator.clipboard?.writeText($('s-url').value); $('s-copy').textContent = 'Скопировано ✓'; };
 
+  let polling = false;
   $('s-login').onclick = async () => {
-    if (session) {                                   // ---- выход
-      try { await fetch('https://id.twitch.tv/oauth2/revoke', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `client_id=${encodeURIComponent(session.v.client_id)}&token=${encodeURIComponent(session.token)}` }); } catch {}
-      session = null; ls.set('token', null); setLoggedIn(false);
-      return savedMsg('Вы вышли из Twitch. Старая ссылка в OBS перестанет работать.', '');
+    if (ls.get('auth', null)) {                        // ---- выход
+      ls.set('auth', null); setLoggedIn(false);
+      return savedMsg('Вы вышли из Twitch на этой странице. Плеер в OBS продолжит работать, пока вы не отключите его: <a href="https://www.twitch.tv/settings/connections" target="_blank" style="color:#d4b8ff">twitch.tv/settings/connections</a> → найдите приложение → «Отключить».', '');
     }
-    const cfg = collect(); if (!cfg) return;          // ---- вход
+    if (polling) return;
+    const cfg = collect(); if (!cfg) return;          // ---- вход по коду
     if (!cfg.client) return alert('Вставьте Client ID');
     ls.set('setup', cfg);
-    location.href = 'https://id.twitch.tv/oauth2/authorize?response_type=token&force_verify=true'
-      + '&client_id=' + encodeURIComponent(cfg.client)
-      + '&redirect_uri=' + encodeURIComponent(PAGE)
-      + '&scope=' + encodeURIComponent(SCOPES.join(' '));
+    polling = true;
+    try {
+      const tok = await deviceLogin(cfg.client, (code, uri) => {
+        $('s-status').innerHTML = `<span style="font-size:17px">Откройте <a href="${esc(uri)}" target="_blank" style="color:#d4b8ff"><b>twitch.tv/activate</b></a> и введите код:</span>
+          <div style="font-size:34px;font-weight:800;letter-spacing:4px;margin:8px 0;color:#d4b8ff">${esc(code)}</div>
+          <small>Страница ждёт подтверждения…</small>`;
+      });
+      const v = await validate(tok.access_token);
+      ls.set('auth', { seed: tok.refresh_token, cid: cfg.client, login: v.login });
+      setLoggedIn(true);
+      try {
+        await ensureRewards(twitchApi(tok.access_token, cfg.client), v.user_id, rewardSpecs(cfg));
+        savedMsg('✅ Вход выполнен, награды созданы на канале.');
+      } catch (e) { savedMsg('Вход выполнен, но награды не создались: ' + esc(e.message), 'err'); }
+      buildUrl(cfg);
+    } catch (e) {
+      $('s-status').innerHTML = `<span class="err">Ошибка входа: ${esc(e.message)}</span>`;
+    } finally { polling = false; }
   };
 
-  // Вернулись с Twitch или уже входили раньше
-  const fresh = hashParams.get('access_token');
-  if (fresh) { ls.set('token', fresh); history.replaceState(null, '', PAGE); }
-  const token = fresh || ls.get('token', null);
-  if (!token) return;
-  $('s-status').textContent = 'Проверяю вход…';
-  try {
-    session = { token, v: await validate(token) };
-    setLoggedIn(true);
-    await apply(ls.get('setup', {}).pls ? ls.get('setup', {}) : collect());
-  } catch (e) {
-    if (!session) { ls.set('token', null); setLoggedIn(false); }
-    $('s-status').innerHTML = `<span class="err">Ошибка: ${esc(e.message)}</span>`;
+  ls.set('token', null);                             // старый способ входа больше не используется
+  if (ls.get('auth', null)) { setLoggedIn(true); buildUrl(ls.get('setup', {}).pls ? ls.get('setup', {}) : collect()); }
+}
+
+// Вход через Twitch по коду (Device Code Flow) — даёт ключ продления
+async function deviceLogin(clientId, showCode) {
+  const r = await fetch('https://id.twitch.tv/oauth2/device', { method: 'POST', body: new URLSearchParams({ client_id: clientId, scopes: SCOPES.join(' ') }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.message || 'Twitch не принял Client ID. Проверьте, что тип клиента — «виден всем».');
+  showCode(d.user_code, d.verification_uri);
+  let interval = (d.interval || 5) * 1000;
+  const until = Date.now() + (d.expires_in || 1800) * 1000;
+  while (Date.now() < until) {
+    await new Promise(res => setTimeout(res, interval));
+    const { ok, j } = await oauthToken({ client_id: clientId, scopes: SCOPES.join(' '), device_code: d.device_code, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' });
+    if (ok) return j;
+    const m = (j.message || '').toLowerCase();
+    if (m.includes('pending')) continue;
+    if (m.includes('slow')) { interval += 5000; continue; }
+    throw new Error(j.message || 'вход отклонён');
   }
+  throw new Error('Код устарел, нажмите «Войти через Twitch» ещё раз.');
+}
+async function oauthToken(params) {
+  const r = await fetch('https://id.twitch.tv/oauth2/token', { method: 'POST', body: new URLSearchParams(params) });
+  return { ok: r.ok, j: await r.json().catch(() => ({})) };
+}
+
+const SCOPES = ['channel:manage:redemptions', 'channel:read:redemptions', 'user:read:chat', 'user:write:chat', 'moderation:read'];
+function rewardSpecs(c) {
+  const linkPrompt = 'Вставьте ссылку на YouTube или YouTube Music. Неверная ссылка, трек длиннее лимита или недоступное видео — баллы вернутся.';
+  return [
+    { title: c.title || 'Музыка', cost: c.cost || 50, prompt: linkPrompt, is_user_input_required: true },
+    { title: c.utitle || 'Срочно музыка', cost: c.ucost || 150, prompt: 'Трек без очереди: играет сразу после текущего заказа, раньше обычных. ' + linkPrompt, is_user_input_required: true },
+    { title: c.stitle || 'Скип музыки', cost: c.scost || 300, prompt: 'Пропустить трек, который сейчас играет.', is_user_input_required: false },
+  ];
 }
 
 // Создаёт награды или обновляет уже созданные этой страницей (ищем по сохранённому ID, затем по названию).
@@ -274,17 +304,35 @@ async function validate(token) {
   if (!r.ok) throw new Error('Ключ Twitch недействителен или истёк. Откройте страницу настройки и войдите снова.');
   return r.json();
 }
-function twitchApi(token, clientId) {
-  return async (method, path, body) => {
+// token — строка или функция, отдающая текущий ключ; onExpired — продлить ключ и повторить запрос
+function twitchApi(token, clientId, onExpired) {
+  const call = async (method, path, body, retried) => {
     const r = await fetch('https://api.twitch.tv/helix/' + path, {
-      method, headers: { Authorization: 'Bearer ' + token, 'Client-Id': clientId, 'Content-Type': 'application/json' },
+      method, headers: { Authorization: 'Bearer ' + (typeof token === 'function' ? token() : token), 'Client-Id': clientId, 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
     });
+    if (r.status === 401 && onExpired && !retried) { await onExpired(); return call(method, path, body, true); }
     if (r.status === 204) return {};
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(`${r.status} ${j.message || j.error || ''}`.trim());
     return j;
   };
+  return (m, p, b) => call(m, p, b, false);
+}
+
+// Ключ плеера в OBS: живая цепочка ключей продления хранится в OBS, ссылка содержит только первый ключ
+const AUTH = { cid: null, access: null, refresh: null, key: null, timer: null, busy: null };
+function refreshAccess() {
+  if (AUTH.busy) return AUTH.busy;                   // ключ продления одноразовый — не продлеваем дважды параллельно
+  AUTH.busy = (async () => {
+    const { ok, j } = await oauthToken({ client_id: AUTH.cid, grant_type: 'refresh_token', refresh_token: AUTH.refresh });
+    if (!ok) throw new Error('Вход в Twitch истёк (OBS не запускался больше 30 дней, приложение отключено, или эту ссылку открывали в другом браузере). Войдите заново на странице настройки и вставьте новую ссылку в OBS.');
+    AUTH.access = j.access_token; AUTH.refresh = j.refresh_token; ls.set(AUTH.key, AUTH.refresh);
+    clearTimeout(AUTH.timer);
+    AUTH.timer = setTimeout(() => refreshAccess().catch(e => warn(e.message)), Math.max(60, (j.expires_in || 14400) - 600) * 1000);
+    return AUTH.access;
+  })().finally(() => { AUTH.busy = null; });
+  return AUTH.busy;
 }
 
 /* =========================================================
@@ -302,7 +350,6 @@ const S = {
 async function playerMode() {
   $('overlay').style.display = 'block';
   if (hashParams.get('video') === '1') $('ytwrap').classList.add('show');
-  const token = hashParams.get('token');
   S.rq = hashParams.get('rq') || hashParams.get('reward'); S.ru = hashParams.get('ru'); S.rs = hashParams.get('rs');
   S.pls = (hashParams.get('pls') || '').split('|').filter(Boolean).map(x => { const [n, id] = x.split('~'); return { n, id }; });
   if (!S.pls.length && hashParams.get('pl')) S.pls = [{ n: 'Плейлист', id: hashParams.get('pl') }];
@@ -315,17 +362,34 @@ async function playerMode() {
   S.volume = ls.get('vol', parseInt(hashParams.get('vol')) || 40);
 
   try {
-    const v = await validate(token);
+    let token, v;
+    const seed = hashParams.get('seed');
+    if (seed) {
+      AUTH.cid = hashParams.get('cid'); AUTH.key = 'rt_' + seed.slice(0, 20);
+      AUTH.refresh = ls.get(AUTH.key, seed);
+      token = await refreshAccess();
+      v = await validate(token);
+      S.tw = twitchApi(() => AUTH.access, AUTH.cid, refreshAccess);
+    } else {                                           // старые ссылки
+      token = hashParams.get('token'); v = await validate(token);
+      S.tw = twitchApi(token, v.client_id);
+      if (v.expires_in < 3 * 86400) warn(`Ключ Twitch истекает через ${Math.max(0, Math.round(v.expires_in / 3600))} ч. — пройдите настройку заново.`);
+    }
     S.me = { id: v.user_id, login: v.login };
-    S.tw = twitchApi(token, v.client_id);
-    if (v.expires_in < 3 * 86400) warn(`Ключ Twitch истекает через ${Math.max(0, Math.round(v.expires_in / 3600))} ч. — пройдите настройку заново.`);
-    connectEventSub(token, v.client_id);
+    if (hashParams.has('t1')) {                        // награды берём из настроек в ссылке
+      const g = k => hashParams.get(k) || '';
+      try {
+        const [rq, ru, rs] = await ensureRewards(S.tw, S.me.id, rewardSpecs({ title: g('t1'), cost: g('c1'), utitle: g('t2'), ucost: g('c2'), stitle: g('t3'), scost: g('c3') }));
+        S.rq = rq.id; S.ru = ru.id; S.rs = rs.id;
+      } catch (e) { warn('Награды: ' + e.message); }
+    }
+    connectEventSub();
     loadMods(); setInterval(loadMods, 5 * 60 * 1000);
   } catch (e) { warn(e.message); }
 
   await loadYT();
   S.bg = shuffle(await fetchPlaylistIds(S.pl?.id));
-  if (!S.bg.length) warn('Не удалось загрузить фоновый плейлист. Он должен быть «Доступ по ссылке» или открытым.');
+  if (!S.bg.length) warn(`Не удалось загрузить фоновый плейлист «${S.pl?.n || ''}». Он должен быть «Доступ по ссылке» или открытым.${S.plError ? ' YouTube: ' + S.plError : ''}`);
   S.player = new YT.Player('yt', {
     width: 320, height: 180,
     playerVars: { autoplay: 1, controls: 0, disablekb: 1, playsinline: 1, rel: 0, origin: location.origin },
@@ -519,7 +583,7 @@ function say(message) {
 }
 
 /* ---------- EventSub WebSocket ---------- */
-function connectEventSub(token, clientId, url = 'wss://eventsub.wss.twitch.tv/ws', isReconnect = false) {
+function connectEventSub(url = 'wss://eventsub.wss.twitch.tv/ws', isReconnect = false) {
   const ws = new WebSocket(url);
   let keepalive = 30, timer = null;
   const arm = () => { clearTimeout(timer); timer = setTimeout(() => { ws.close(); }, (keepalive + 10) * 1000); };
@@ -538,7 +602,7 @@ function connectEventSub(token, clientId, url = 'wss://eventsub.wss.twitch.tv/ws
     } else if (type === 'session_reconnect') {
       const nu = msg.payload.session.reconnect_url;
       const old = ws; old.onclose = null; clearTimeout(timer);
-      connectEventSub(token, clientId, nu, true);
+      connectEventSub(nu, true);
       setTimeout(() => old.close(), 2000);
     } else if (type === 'notification') {
       const t = msg.metadata.subscription_type, ev = msg.payload.event;
@@ -548,7 +612,7 @@ function connectEventSub(token, clientId, url = 'wss://eventsub.wss.twitch.tv/ws
       warn('Twitch отозвал доступ: ' + msg.payload.subscription.status + '. Пройдите настройку заново.');
     }
   };
-  ws.onclose = () => { clearTimeout(timer); warn('Нет связи с Twitch, переподключаюсь…'); setTimeout(() => connectEventSub(token, clientId), 5000); };
+  ws.onclose = () => { clearTimeout(timer); warn('Нет связи с Twitch, переподключаюсь…'); setTimeout(() => connectEventSub(), 5000); };
 }
 
 /* ---------- YouTube ---------- */
@@ -559,8 +623,25 @@ function loadYT() {
   });
 }
 
-// Достаём список ID видео из плейлиста через скрытый плеер (без API-ключа).
-function fetchPlaylistIds(list) {
+// Список ID видео плейлиста: через YouTube API (если есть ключ), иначе через скрытый плеер.
+async function fetchPlaylistIds(list) {
+  if (!list) return [];
+  if (S.ytKey) {
+    try {
+      const ids = []; let page = '';
+      do {
+        const r = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?part=contentDetails,status&maxResults=50&playlistId=${encodeURIComponent(list)}&key=${encodeURIComponent(S.ytKey)}${page ? '&pageToken=' + page : ''}`);
+        const j = await r.json();
+        if (!r.ok) { console.warn('playlist api', j.error?.message); S.plError = j.error?.message || ''; break; }
+        (j.items || []).forEach(it => { if (it.status?.privacyStatus !== 'private') ids.push(it.contentDetails.videoId); });
+        page = j.nextPageToken || '';
+      } while (page && ids.length < 5000);
+      if (ids.length) return ids;
+    } catch (e) { console.warn('playlist api', e); }
+  }
+  return fetchPlaylistIdsViaPlayer(list);
+}
+function fetchPlaylistIdsViaPlayer(list) {
   return new Promise(resolve => {
     if (!list) return resolve([]);
     const ids = new Set(); let lastSize = -1, idx = 0, done = false;
@@ -637,7 +718,7 @@ function hideWarn() { $('warn').style.display = 'none'; }
 // экспорт для тестов
 window.__mp = { switchPlaylist, isoDur, extractVideoId, extractPlaylistId, S, onRedemption, onChat, next };
 
-if (hashParams.get('token')) playerMode(); else setupMode();
+if (hashParams.get('token') || hashParams.get('seed')) playerMode(); else setupMode();
 </script>
 </body>
 </html>
