@@ -40,6 +40,9 @@
   #setup .plrow input[type=radio] { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--acc); }
   #setup .plrow .del { flex: none; background: none; border: 0; color: #ff9b9b; font-size: 18px; cursor: pointer; margin: 0; padding: 0 6px; }
   #setup #s-addpl { margin-top: 8px; padding: 7px 12px; background: #333; font-size: 14px; }
+  #setup .btns { display: flex; gap: 10px; flex-wrap: wrap; }
+  #setup #s-save { background: #2f9e5b; }
+  #setup #s-login.out { background: #444; }
   #setup textarea { width: 100%; height: 110px; padding: 10px; border: 1px solid #333; font-size: 13px; }
   .row { display: flex; gap: 12px; } .row > div { flex: 1; }
   .ok { color: #8ef0a8; } .err { color: #ff9b9b; }
@@ -90,12 +93,16 @@
     <label>YouTube API key (необязательно — точнее проверка просмотров и длины)
       <input id="s-ytkey" placeholder="можно оставить пустым" autocomplete="off"></label>
     <p><small>Лимиты длины и просмотров не действуют на вас и модераторов.</small></p>
-    <button id="s-login">Войти через Twitch</button>
+    <div class="btns">
+      <button id="s-save">💾 Сохранить</button>
+      <button id="s-login">Войти через Twitch</button>
+    </div>
+    <p id="s-saved"></p>
   </div>
-  <div id="s-step2" style="display:none">
-    <p id="s-status">Проверяю вход…</p>
+  <div id="s-step2">
+    <p id="s-status"></p>
     <div id="s-done" style="display:none">
-      <p>2. Скопируйте этот адрес и вставьте в OBS: <b>Источник → Браузер → URL</b>. Ширина 500, высота 400. Включите «Управлять звуком через OBS».</p>
+      <p>2. Скопируйте этот адрес и вставьте в OBS: <b>Источник → Браузер → URL</b>. Ширина 500, высота 400. Включите «Управлять звуком через OBS».<br><small>После каждого «Сохранить» адрес меняется — обновите его в OBS.</small></p>
       <textarea id="s-url" readonly></textarea>
       <p><small>⚠️ В адресе лежит ваш ключ Twitch. Не показывайте его на стриме и никому не отправляйте.</small></p>
       <button id="s-copy">Скопировать</button>
@@ -148,35 +155,30 @@ async function setupMode() {
   savedPls.forEach((x, i) => addRow(x.n, 'https://music.youtube.com/playlist?list=' + x.id, i === (saved.def || 0)));
   $('s-addpl').onclick = () => addRow();
 
-  $('s-login').onclick = () => {
+  const SCOPES = ['channel:manage:redemptions', 'channel:read:redemptions', 'user:read:chat', 'user:write:chat', 'moderation:read'];
+  let session = null;   // { token, v } когда вошли
+
+  // Собрать настройки из формы. null — если есть ошибка (уже показана).
+  const collect = () => {
     const cfg = {}; for (const k of KEYS) cfg[k] = $('s-' + k).value.trim();
-    if (!cfg.client) return alert('Вставьте Client ID');
     cfg.pls = []; cfg.def = 0;
     for (const row of $('s-pls').querySelectorAll('.plrow')) {
       const raw = row.querySelector('.pl').value.trim(), id = extractPlaylistId(raw) || (/^[A-Za-z0-9_-]{10,}$/.test(raw) ? raw : null);
       const n = row.querySelector('.pn').value.trim();
       if (!raw && !n) continue;
-      if (!id) return alert(`Не понял ссылку на плейлист «${n || raw}»`);
-      if (!n) return alert('Впишите название для каждого плейлиста');
+      if (!id) { alert(`Не понял ссылку на плейлист «${n || raw}»`); return null; }
+      if (!n) { alert('Впишите название для каждого плейлиста'); return null; }
       if (row.querySelector('input[type=radio]').checked) cfg.def = cfg.pls.length;
       cfg.pls.push({ n, id });
     }
-    if (!cfg.pls.length) return alert('Добавьте хотя бы один плейлист');
-    ls.set('setup', cfg);
-    const scopes = ['channel:manage:redemptions', 'channel:read:redemptions', 'user:read:chat', 'user:write:chat', 'moderation:read'];
-    location.href = 'https://id.twitch.tv/oauth2/authorize?response_type=token&force_verify=true'
-      + '&client_id=' + encodeURIComponent(cfg.client)
-      + '&redirect_uri=' + encodeURIComponent(PAGE)
-      + '&scope=' + encodeURIComponent(scopes.join(' '));
+    if (!cfg.pls.length) { alert('Добавьте хотя бы один плейлист'); return null; }
+    return cfg;
   };
+  const savedMsg = (html, cls = 'ok') => { $('s-saved').innerHTML = `<span class="${cls}">${html}</span>`; };
 
-  const token = hashParams.get('access_token');
-  if (!token) return;
-  history.replaceState(null, '', PAGE);
-  $('s-step1').style.display = 'none'; $('s-step2').style.display = 'block';
-  const cfg = ls.get('setup', {});
-  try {
-    const v = await validate(token);
+  // Обновить награды на Twitch и собрать ссылку для OBS
+  const apply = async (cfg) => {
+    const { token, v } = session;
     const tw = twitchApi(token, v.client_id);
     const linkPrompt = 'Вставьте ссылку на YouTube или YouTube Music. Неверная ссылка, трек длиннее лимита или недоступное видео — баллы вернутся.';
     const [rq, ru, rs] = await ensureRewards(tw, v.user_id, [
@@ -187,10 +189,56 @@ async function setupMode() {
     const p = new URLSearchParams({ token, pls: cfg.pls.map(x => x.n.replace(/[~|]/g, ' ') + '~' + x.id).join('|'), def: cfg.def || 0, rq: rq.id, ru: ru.id, rs: rs.id, max: cfg.max, views: cfg.views, per: cfg.per, vol: cfg.vol });
     if (cfg.ytkey) p.set('ytkey', cfg.ytkey);
     $('s-url').value = PAGE + '#' + p.toString();
-    $('s-status').innerHTML = `<span class="ok">✅ Вход выполнен как <b>${esc(v.login)}</b>. Награды готовы: ${[rq, ru, rs].map(r => `«${esc(r.title)}» — ${r.cost}`).join(', ')} баллов.</span><br><small>Ключ действует примерно ${Math.round(v.expires_in / 86400)} дн., потом откройте эту страницу и войдите заново.</small>`;
+    $('s-copy').textContent = 'Скопировать';
+    $('s-status').innerHTML = `<span class="ok">✅ Вы вошли как <b>${esc(v.login)}</b>. Награды: ${[rq, ru, rs].map(r => `«${esc(r.title)}» — ${r.cost}`).join(', ')} баллов.</span><br><small>Вход действует примерно ${Math.round(v.expires_in / 86400)} дн., потом войдите заново.</small>`;
     $('s-done').style.display = 'block';
-    $('s-copy').onclick = () => { $('s-url').select(); navigator.clipboard?.writeText($('s-url').value); $('s-copy').textContent = 'Скопировано ✓'; };
+  };
+
+  const setLoggedIn = (on) => {
+    $('s-login').textContent = on ? 'Выйти из Twitch' : 'Войти через Twitch';
+    $('s-login').classList.toggle('out', on);
+    if (!on) { $('s-done').style.display = 'none'; $('s-status').innerHTML = ''; }
+  };
+
+  $('s-save').onclick = async () => {
+    const cfg = collect(); if (!cfg) return;
+    ls.set('setup', cfg);
+    const plInfo = `Плейлистов: ${cfg.pls.length} (${cfg.pls.map(x => '«' + esc(x.n) + '»').join(', ')}).`;
+    if (!session) return savedMsg(`✅ Сохранено. ${plInfo} Войдите через Twitch, чтобы получить ссылку для OBS.`);
+    savedMsg('Сохраняю…', '');
+    try { await apply(cfg); savedMsg(`✅ Сохранено. ${plInfo} Ссылка для OBS обновлена ниже — вставьте новую в OBS.`); }
+    catch (e) { savedMsg('Ошибка: ' + esc(e.message), 'err'); }
+  };
+
+  $('s-copy').onclick = () => { $('s-url').select(); navigator.clipboard?.writeText($('s-url').value); $('s-copy').textContent = 'Скопировано ✓'; };
+
+  $('s-login').onclick = async () => {
+    if (session) {                                   // ---- выход
+      try { await fetch('https://id.twitch.tv/oauth2/revoke', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `client_id=${encodeURIComponent(session.v.client_id)}&token=${encodeURIComponent(session.token)}` }); } catch {}
+      session = null; ls.set('token', null); setLoggedIn(false);
+      return savedMsg('Вы вышли из Twitch. Старая ссылка в OBS перестанет работать.', '');
+    }
+    const cfg = collect(); if (!cfg) return;          // ---- вход
+    if (!cfg.client) return alert('Вставьте Client ID');
+    ls.set('setup', cfg);
+    location.href = 'https://id.twitch.tv/oauth2/authorize?response_type=token&force_verify=true'
+      + '&client_id=' + encodeURIComponent(cfg.client)
+      + '&redirect_uri=' + encodeURIComponent(PAGE)
+      + '&scope=' + encodeURIComponent(SCOPES.join(' '));
+  };
+
+  // Вернулись с Twitch или уже входили раньше
+  const fresh = hashParams.get('access_token');
+  if (fresh) { ls.set('token', fresh); history.replaceState(null, '', PAGE); }
+  const token = fresh || ls.get('token', null);
+  if (!token) return;
+  $('s-status').textContent = 'Проверяю вход…';
+  try {
+    session = { token, v: await validate(token) };
+    setLoggedIn(true);
+    await apply(ls.get('setup', {}).pls ? ls.get('setup', {}) : collect());
   } catch (e) {
+    if (!session) { ls.set('token', null); setLoggedIn(false); }
     $('s-status').innerHTML = `<span class="err">Ошибка: ${esc(e.message)}</span>`;
   }
 }
