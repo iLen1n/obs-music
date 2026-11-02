@@ -148,7 +148,7 @@ async function setupMode() {
     const linkPrompt = 'Вставьте ссылку на YouTube или YouTube Music. Неверная ссылка, трек длиннее лимита или недоступное видео — баллы вернутся.';
     const [rq, ru, rs] = await ensureRewards(tw, v.user_id, [
       { title: cfg.title || 'Музыка', cost: cfg.cost || 50, prompt: linkPrompt, is_user_input_required: true },
-      { title: cfg.utitle || 'Срочно музыка', cost: cfg.ucost || 150, prompt: 'Трек без очереди: играет сразу после текущего заказа (фоновую музыку прерывает). ' + linkPrompt, is_user_input_required: true },
+      { title: cfg.utitle || 'Срочно музыка', cost: cfg.ucost || 150, prompt: 'Трек без очереди: играет сразу после текущего заказа, раньше обычных. ' + linkPrompt, is_user_input_required: true },
       { title: cfg.stitle || 'Скип музыки', cost: cfg.scost || 300, prompt: 'Пропустить трек, который сейчас играет.', is_user_input_required: false },
     ]);
     const p = new URLSearchParams({ token, pl: cfg.pl, rq: rq.id, ru: ru.id, rs: rs.id, max: cfg.max, per: cfg.per, vol: cfg.vol });
@@ -350,11 +350,11 @@ async function onRedemption(ev) {
   } else S.queue.push(item);
   saveQueue(); renderQueue();
   const place = S.queue.indexOf(item) + 1;
-  if (urgent && S.current && !S.current.redemptionId) {  // фон прерываем сразу
-    say(`🚨 @${user}, срочный заказ: ${title || vid} — включаю!`);
+  if (!S.current || !S.current.redemptionId) {          // играет фон (или тишина) — любой заказ включаем сразу
+    say(`${urgent ? '🚨 ' : ''}@${user}, ${urgent ? 'срочный заказ' : 'заказ'}: ${title || vid} — включаю!`);
     return next();
   }
-  say(urgent ? `🚨 @${user}, срочный заказ: ${title || vid} — следующий после текущего трека.`
+  say(urgent ? `🚨 @${user}, срочный заказ: ${title || vid} — ${place === 1 ? 'следующий после текущего трека' : 'в срочной очереди ' + place + '-м'}.`
              : `@${user}, добавил: ${title || vid} — в очереди ${place}-м.`);
 }
 
