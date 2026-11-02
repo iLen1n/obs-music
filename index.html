@@ -71,12 +71,17 @@
     </div>
     <div class="row">
       <div><label>Макс. длина трека, мин
-        <input id="s-max" type="number" value="7"></label></div>
+        <input id="s-max" type="number" value="6"></label></div>
+      <div><label>Мин. просмотров
+        <input id="s-views" type="number" value="10000"></label></div>
       <div><label>Заказов в очереди на человека
         <input id="s-per" type="number" value="2"></label></div>
       <div><label>Громкость, %
         <input id="s-vol" type="number" value="40"></label></div>
     </div>
+    <label>YouTube API key (необязательно — точнее проверка просмотров и длины)
+      <input id="s-ytkey" placeholder="можно оставить пустым" autocomplete="off"></label>
+    <p><small>Лимиты длины и просмотров не действуют на вас и модераторов.</small></p>
     <button id="s-login">Войти через Twitch</button>
   </div>
   <div id="s-step2" style="display:none">
@@ -122,7 +127,7 @@ async function setupMode() {
   $('setup').style.display = 'block';
   $('s-redirect').textContent = PAGE;
   const saved = ls.get('setup', {});
-  const KEYS = ['client', 'pl', 'title', 'cost', 'utitle', 'ucost', 'stitle', 'scost', 'max', 'per', 'vol'];
+  const KEYS = ['client', 'pl', 'title', 'cost', 'utitle', 'ucost', 'stitle', 'scost', 'max', 'views', 'ytkey', 'per', 'vol'];
   for (const k of KEYS) if (saved[k] != null) $('s-' + k).value = saved[k];
 
   $('s-login').onclick = () => {
@@ -130,7 +135,7 @@ async function setupMode() {
     if (!cfg.client) return alert('Вставьте Client ID');
     cfg.pl = extractPlaylistId(cfg.pl) || cfg.pl;
     ls.set('setup', cfg);
-    const scopes = ['channel:manage:redemptions', 'channel:read:redemptions', 'user:read:chat', 'user:write:chat'];
+    const scopes = ['channel:manage:redemptions', 'channel:read:redemptions', 'user:read:chat', 'user:write:chat', 'moderation:read'];
     location.href = 'https://id.twitch.tv/oauth2/authorize?response_type=token&force_verify=true'
       + '&client_id=' + encodeURIComponent(cfg.client)
       + '&redirect_uri=' + encodeURIComponent(PAGE)
@@ -151,7 +156,8 @@ async function setupMode() {
       { title: cfg.utitle || 'Срочно музыка', cost: cfg.ucost || 150, prompt: 'Трек без очереди: играет сразу после текущего заказа, раньше обычных. ' + linkPrompt, is_user_input_required: true },
       { title: cfg.stitle || 'Скип музыки', cost: cfg.scost || 300, prompt: 'Пропустить трек, который сейчас играет.', is_user_input_required: false },
     ]);
-    const p = new URLSearchParams({ token, pl: cfg.pl, rq: rq.id, ru: ru.id, rs: rs.id, max: cfg.max, per: cfg.per, vol: cfg.vol });
+    const p = new URLSearchParams({ token, pl: cfg.pl, rq: rq.id, ru: ru.id, rs: rs.id, max: cfg.max, views: cfg.views, per: cfg.per, vol: cfg.vol });
+    if (cfg.ytkey) p.set('ytkey', cfg.ytkey);
     $('s-url').value = PAGE + '#' + p.toString();
     $('s-status').innerHTML = `<span class="ok">✅ Вход выполнен как <b>${esc(v.login)}</b>. Награды готовы: ${[rq, ru, rs].map(r => `«${esc(r.title)}» — ${r.cost}`).join(', ')} баллов.</span><br><small>Ключ действует примерно ${Math.round(v.expires_in / 86400)} дн., потом откройте эту страницу и войдите заново.</small>`;
     $('s-done').style.display = 'block';
@@ -210,7 +216,7 @@ function twitchApi(token, clientId) {
    ========================================================= */
 const S = {
   tw: null, me: null, rq: null, ru: null, rs: null,
-  maxSec: 420, perUser: 2, volume: 40, plId: null,
+  maxSec: 360, minViews: 10000, ytKey: '', mods: new Set(), perUser: 2, volume: 40, plId: null,
   queue: ls.get('queue', []),        // [{vid, user, userId, redemptionId}]
   bg: [], bgPos: 0,                  // фоновый плейлист
   current: null,                     // {vid, user?, redemptionId?, checked}
@@ -223,7 +229,9 @@ async function playerMode() {
   const token = hashParams.get('token');
   S.rq = hashParams.get('rq') || hashParams.get('reward'); S.ru = hashParams.get('ru'); S.rs = hashParams.get('rs');
   S.plId = hashParams.get('pl');
-  S.maxSec = (parseFloat(hashParams.get('max')) || 7) * 60;
+  S.maxSec = (parseFloat(hashParams.get('max')) || 6) * 60;
+  S.minViews = hashParams.has('views') ? parseInt(hashParams.get('views')) || 0 : 10000;
+  S.ytKey = hashParams.get('ytkey') || '';
   S.perUser = parseInt(hashParams.get('per')) || 2;
   S.volume = ls.get('vol', parseInt(hashParams.get('vol')) || 40);
 
@@ -233,6 +241,7 @@ async function playerMode() {
     S.tw = twitchApi(token, v.client_id);
     if (v.expires_in < 3 * 86400) warn(`Ключ Twitch истекает через ${Math.max(0, Math.round(v.expires_in / 3600))} ч. — пройдите настройку заново.`);
     connectEventSub(token, v.client_id);
+    loadMods(); setInterval(loadMods, 5 * 60 * 1000);
   } catch (e) { warn(e.message); }
 
   await loadYT();
@@ -270,7 +279,7 @@ function onState(e) {
     S.current.checked = true;
     const dur = S.player.getDuration();
     if (S.current.redemptionId) {
-      if (dur > S.maxSec + 5) {
+      if (!S.current.priv && dur > S.maxSec + 5) {
         resolveRedemption(S.current, false);
         say(`@${S.current.user}, трек длиннее ${Math.round(S.maxSec / 60)} мин — баллы вернул.`);
         return next();
@@ -342,8 +351,18 @@ async function onRedemption(ev) {
   if (S.queue.some(q => q.vid === vid) || (S.current && S.current.vid === vid)) {
     resolveRedemption(r, false); return say(`@${user}, этот трек уже в очереди — баллы вернул.`);
   }
+  const priv = isPrivileged(ev.user_id);
+  if (!priv) {
+    const info = await getVideoInfo(vid);
+    if (info.views != null && info.views < S.minViews) {
+      resolveRedemption(r, false); return say(`@${user}, у видео меньше ${S.minViews.toLocaleString('ru')} просмотров — баллы вернул.`);
+    }
+    if (info.duration != null && info.duration > S.maxSec + 5) {
+      resolveRedemption(r, false); return say(`@${user}, трек длиннее ${Math.round(S.maxSec / 60)} мин — баллы вернул.`);
+    }
+  }
   const title = await fetchTitle(vid);
-  const item = { ...r, vid, title, urgent };
+  const item = { ...r, vid, title, urgent, priv };
   if (urgent) {
     const pos = S.queue.findIndex(q => !q.urgent);      // после других срочных, перед обычными
     S.queue.splice(pos < 0 ? S.queue.length : pos, 0, item);
@@ -468,6 +487,35 @@ function fetchPlaylistIds(list) {
   });
 }
 
+// Стример и модераторы — без лимитов
+function isPrivileged(uid) { return uid === S.me?.id || S.mods.has(uid); }
+async function loadMods() {
+  if (!S.tw) return;
+  try {
+    const set = new Set(); let after = '';
+    do {
+      const j = await S.tw('GET', `moderation/moderators?broadcaster_id=${S.me.id}&first=100${after ? '&after=' + after : ''}`);
+      (j.data || []).forEach(m => set.add(m.user_id)); after = j.pagination?.cursor || '';
+    } while (after);
+    S.mods = set;
+  } catch (e) { console.warn('mods', e); }
+}
+
+// Просмотры и длина видео. С ключом — YouTube Data API, без ключа — открытый API Return YouTube Dislike (только просмотры).
+async function getVideoInfo(vid) {
+  try {
+    if (S.ytKey) {
+      const j = await (await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,contentDetails&id=${vid}&key=${encodeURIComponent(S.ytKey)}`)).json();
+      const it = j.items?.[0];
+      if (it) return { views: +it.statistics.viewCount, duration: isoDur(it.contentDetails.duration) };
+    }
+    const r = await fetch(`https://returnyoutubedislikeapi.com/votes?videoId=${vid}`);
+    if (r.ok) { const j = await r.json(); return { views: j.viewCount ?? null, duration: null }; }
+  } catch (e) { console.warn('views', e); }
+  return { views: null, duration: null };   // не узнали — не блокируем, длину проверим при запуске
+}
+function isoDur(s) { const m = (s || '').match(/P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/); return m ? (+m[1] || 0) * 86400 + (+m[2] || 0) * 3600 + (+m[3] || 0) * 60 + (+m[4] || 0) : null; }
+
 async function fetchTitle(vid) {
   try {
     const r = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent('https://www.youtube.com/watch?v=' + vid)}`);
@@ -490,7 +538,7 @@ function warn(t) { $('warn').textContent = '⚠️ ' + t; $('warn').style.displa
 function hideWarn() { $('warn').style.display = 'none'; }
 
 // экспорт для тестов
-window.__mp = { extractVideoId, extractPlaylistId, S, onRedemption, onChat, next };
+window.__mp = { isoDur, extractVideoId, extractPlaylistId, S, onRedemption, onChat, next };
 
 if (hashParams.get('token')) playerMode(); else setupMode();
 </script>
