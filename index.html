@@ -34,7 +34,12 @@
   #setup input { width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid #333; background: #0e0e14; color: #fff; font-size: 15px; margin-top: 4px; }
   #setup button { margin-top: 18px; padding: 11px 18px; border: 0; border-radius: 9px; background: var(--acc); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }
   #setup code, #setup textarea { background: #0e0e14; border-radius: 6px; padding: 2px 6px; color: #d4b8ff; }
-  .plrow { display: flex; gap: 8px; align-items: center; margin-top: 6px; } .plrow input[type=text] { flex: 1; margin: 0; } .plrow input[type=radio] { width: auto; margin: 0; } .plrow .del { background: none; border: 0; color: #ff9b9b; font-size: 18px; cursor: pointer; margin: 0; padding: 0 4px; }
+  #setup .plrow { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+  #setup .plrow input[type=text] { flex: 1 1 auto; width: auto; min-width: 0; margin: 0; }
+  #setup .plrow input.pn { flex: 0 0 170px; }
+  #setup .plrow input[type=radio] { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--acc); }
+  #setup .plrow .del { flex: none; background: none; border: 0; color: #ff9b9b; font-size: 18px; cursor: pointer; margin: 0; padding: 0 6px; }
+  #setup #s-addpl { margin-top: 8px; padding: 7px 12px; background: #333; font-size: 14px; }
   #setup textarea { width: 100%; height: 110px; padding: 10px; border: 1px solid #333; font-size: 13px; }
   .row { display: flex; gap: 12px; } .row > div { flex: 1; }
   .ok { color: #8ef0a8; } .err { color: #ff9b9b; }
@@ -52,7 +57,7 @@
       <input id="s-client" placeholder="например 3x8ab1c2d3e4f5..." autocomplete="off"></label>
     <label>Фоновые плейлисты — название и ссылка. ● — какой играет при запуске</label>
     <div id="s-pls"></div>
-    <button type="button" id="s-addpl" style="margin-top:8px;padding:7px 12px;background:#333">+ Добавить плейлист</button>
+    <button type="button" id="s-addpl">+ Добавить плейлист</button>
     <p><small>На стриме вы и модераторы переключаете их командой <code>!плейлист название</code>. Плейлисты должны быть «по ссылке» или открытыми.</small></p>
     <div class="row">
       <div><label>Награда «заказ»
@@ -134,7 +139,7 @@ async function setupMode() {
   for (const k of KEYS) if (saved[k] != null) $('s-' + k).value = saved[k];
   const addRow = (n = '', link = '', def = false) => {
     const d = document.createElement('div'); d.className = 'plrow';
-    d.innerHTML = `<input type="radio" name="defpl" title="Играет при запуске"><input type="text" class="pn" placeholder="Название, напр. Рок" style="max-width:170px"><input type="text" class="pl" placeholder="Ссылка на плейлист"><button type="button" class="del" title="Удалить">✕</button>`;
+    d.innerHTML = `<input type="radio" name="defpl" title="Играет при запуске"><input type="text" class="pn" placeholder="Название, напр. Рок"><input type="text" class="pl" placeholder="Ссылка на плейлист"><button type="button" class="del" title="Удалить">✕</button>`;
     d.querySelector('.pn').value = n; d.querySelector('.pl').value = link; d.querySelector('input[type=radio]').checked = def;
     d.querySelector('.del').onclick = () => d.remove();
     $('s-pls').appendChild(d);
