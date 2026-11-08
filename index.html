@@ -111,7 +111,20 @@
       <small>Войдите в свой аккаунт Google прямо здесь, в OBS. После входа откроется YouTube. Затем в свойствах источника нажмите «Обновить кэш текущей страницы» (или «ОК»), и плеер вернётся.</small><br>
       <button type="button" id="s-yt" style="margin-top:10px;background:#c4302b">Войти в YouTube</button>
     </div>
-    <p><small style="opacity:.6">версия 8 · плеер: #obs</small></p>
+    <div style="margin-top:18px;padding:12px;background:#0e0e14;border-radius:10px">
+      <b>🎬 Лог музыки для монтажа</b><br>
+      <small>Плеер записывает, какой трек играл и с какой секунды, по часам компьютера. Этот лог можно отдать Claude при монтаже клипов: он сам найдёт, какая музыка звучала в нужный момент. Лог пишет плеер в источнике OBS, поэтому выгружайте его через ⚙ в самом источнике (правой кнопкой → «Взаимодействовать»).</small>
+      <div class="btns" style="align-items:center">
+        <select id="s-logrange" style="margin-top:18px;padding:10px;border-radius:9px;background:#0e0e14;color:#fff;border:1px solid #333;font-size:15px">
+          <option value="1">за 24 часа</option><option value="3">за 3 дня</option><option value="7" selected>за 7 дней</option><option value="0">весь</option>
+        </select>
+        <button type="button" id="s-logcopy">📋 Скопировать лог</button>
+        <button type="button" id="s-logdl" style="background:#444">💾 Скачать файл</button>
+      </div>
+      <p id="s-loginfo" style="margin-bottom:0"></p>
+      <textarea id="s-logtext" readonly style="display:none;margin-top:8px"></textarea>
+    </div>
+    <p><small style="opacity:.6">версия 9 · плеер: #obs</small></p>
     <div id="s-done">
       <p><b>Плеер в OBS:</b> Источник → Браузер, адрес <code>https://ilen1n.github.io/obs-music/#obs</code>, ширина 500, высота 400, включите «Управлять звуком через OBS». Адрес постоянный — менять его не нужно. Всё, что вы сохраните здесь, плеер применит сам через пару секунд.</p>
     </div>
@@ -231,6 +244,28 @@ async function setupMode(embedded) {
       $('s-status').innerHTML = `<span class="err">Ошибка входа: ${esc(e.message)}</span>`;
     } finally { polling = false; }
   };
+
+  // ---- лог музыки
+  $('s-logrange').onchange = updateLogInfo;
+  $('s-logcopy').onclick = async () => {
+    const { rows, text } = exportLog();
+    if (!rows.length) return updateLogInfo();
+    const ok = await copyText(text);
+    $('s-logtext').style.display = ok ? 'none' : 'block';
+    if (!ok) { $('s-logtext').value = text; $('s-logtext').select(); }
+    $('s-loginfo').innerHTML = ok ? `<span class="ok">✅ Скопировано записей: ${rows.length}. Вставьте в файл или прямо в чат с Claude.</span>`
+                                  : '<span class="err">Не получилось скопировать автоматически. Текст выделен ниже: нажмите Ctrl+C.</span>';
+  };
+  $('s-logdl').onclick = () => {
+    const { rows, text } = exportLog();
+    if (!rows.length) return updateLogInfo();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'application/x-ndjson' }));
+    a.download = `music-log_${isoLocal(Date.now()).slice(0, 10)}.jsonl`;
+    document.body.appendChild(a); a.click(); a.remove();
+    $('s-loginfo').innerHTML = '<small>Если файл не скачался (в OBS так бывает), нажмите «Скопировать лог».</small>';
+  };
+  updateLogInfo();
 
   ls.set('token', null);                             // старый способ входа больше не используется
   if (!window.obsstudio) $('s-notobs').style.display = 'block';
@@ -359,13 +394,14 @@ async function playerMode() {
   S.ytKey = cfg.ytkey || '';
   S.perUser = parseInt(cfg.per) || 2;
   S.volume = ls.get('vol', parseInt(cfg.vol) || 40);
+  musicLog('session', { vol: S.volume });             // плеер (OBS) запущен — всё, что играло до этого, уже не играет
 
   // Настройки меняются в доке или по ⚙ — перезапускаемся сами
   const ident = () => JSON.stringify([ls.get('setup', {}), (ls.get('auth', null) || {}).login, (ls.get('auth', null) || {}).cid]);
   const snap = ident();
   const check = () => { if (!document.body.classList.contains('cfg') && ident() !== snap) location.reload(); };
   setInterval(check, 3000); window.addEventListener('storage', check);
-  $('gear').onclick = () => { document.body.classList.add('cfg'); };
+  $('gear').onclick = () => { document.body.classList.add('cfg'); updateLogInfo(); };
   $('s-close').style.display = 'block';
   $('s-close').onclick = () => { document.body.classList.remove('cfg'); check(); };
   setupMode(true);
@@ -402,6 +438,7 @@ async function playerMode() {
 
 function next() {
   if (!S.ready) return;
+  closeTrack('stop');                                  // скип, смена плейлиста, ошибка — трек оборвался
   let item = S.queue.shift();
   saveQueue();
   if (!item) {
@@ -415,7 +452,13 @@ function next() {
 }
 
 function onState(e) {
-  if (e.data === YT.PlayerState.ENDED) return next();
+  const st = e.data, prev = S.lastState, c = S.current, P = YT.PlayerState;
+  S.lastState = st;
+  if (st === P.ENDED) { closeTrack('end'); return next(); }
+  if (c && c.logged && !c.closed) {
+    if (st === P.PAUSED) musicLog('pause', { vid: c.vid, pos: curPos() });
+    if (st === P.PLAYING && (prev === P.PAUSED || prev === P.BUFFERING)) musicLog(prev === P.PAUSED ? 'resume' : 'sync', { vid: c.vid, pos: curPos() });
+  }
   if (e.data === YT.PlayerState.PLAYING && S.current && !S.current.checked) {
     S.current.checked = true;
     const dur = S.player.getDuration();
@@ -429,6 +472,7 @@ function onState(e) {
       const d = S.player.getVideoData();
       say(`▶️ Сейчас играет заказ от @${S.current.user}: ${d.title}`);
     }
+    logTrackStart(S.current, dur);
     renderCard();
   }
 }
@@ -546,7 +590,7 @@ function onChat(ev) {
       if (!isMod) return;
       const n = Math.max(0, Math.min(100, parseInt(arg)));
       if (isNaN(n)) return say(`Громкость: ${S.volume}%`);
-      S.volume = n; ls.set('vol', n); S.player?.setVolume(n); return say(`Громкость: ${n}%`);
+      S.volume = n; ls.set('vol', n); S.player?.setVolume(n); musicLog('vol', { vol: n }); return say(`Громкость: ${n}%`);
     }
     case '!pause': case '!пауза': if (isMod) S.player?.pauseVideo(); return;
     case '!play': case '!плей': if (isMod) S.player?.playVideo(); return;
@@ -700,6 +744,64 @@ async function fetchTitle(vid) {
   return '';
 }
 
+/* ---------- лог музыки для монтажа ----------
+   Каждая строка — событие с локальным временем ПК (ISO + часовой пояс) и позицией в треке (pos, сек).
+   play — трек начал звучать; pause/resume — пауза; sync — после подвисания; end — доиграл; stop — оборван (скип и т.п.);
+   session — плеер запущен заново (предыдущий трек к этому моменту уже не звучит); vol — громкость. */
+const LOG_MAX = 8000;
+function isoLocal(ms) {
+  const d = new Date(ms), off = -d.getTimezoneOffset(), p = (n, l = 2) => String(Math.abs(n)).padStart(l, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`
+    + `${off < 0 ? '-' : '+'}${p(Math.trunc(off / 60))}:${p(off % 60)}`;
+}
+function musicLog(ev, extra = {}) {
+  const log = ls.get('log', []);
+  log.push({ t: isoLocal(Date.now()), ev, ...extra });
+  if (log.length > LOG_MAX) log.splice(0, log.length - LOG_MAX);
+  for (;;) {                                          // не влезло в хранилище — выкидываем старую половину
+    try { localStorage.setItem('mp_log', JSON.stringify(log)); break; }
+    catch { if (log.length < 20) break; log.splice(0, Math.ceil(log.length / 2)); }
+  }
+}
+function curPos() { try { return Math.round((S.player.getCurrentTime() || 0) * 10) / 10; } catch { return null; } }
+function logTrackStart(c, dur) {
+  if (!c || c.logged) return;
+  const d = S.player.getVideoData() || {};
+  c.logged = true;
+  musicLog('play', {
+    vid: c.vid, url: 'https://youtu.be/' + c.vid, title: cleanTitle(d.title || c.title || ''), author: (d.author || '').replace(/ - Topic$/, ''),
+    pos: curPos(), dur: Math.round(dur || 0), src: c.redemptionId ? (c.urgent ? 'urgent' : 'order') : 'bg',
+    ...(c.user ? { by: c.user } : { pl: S.pl?.n || '' }),
+  });
+}
+function closeTrack(ev) {
+  const c = S.current;
+  if (!c || !c.logged || c.closed) return;
+  c.closed = true;
+  musicLog(ev, { vid: c.vid, pos: curPos() });
+}
+function exportLog() {
+  const days = parseFloat($('s-logrange').value) || 0, from = days ? Date.now() - days * 864e5 : 0;
+  const rows = ls.get('log', []).filter(e => Date.parse(e.t) >= from);
+  const meta = { ev: 'meta', app: 'iLen1n obs-music', exported: isoLocal(Date.now()),
+    about: 't — время ПК; pos — секунда трека в этот момент. Трек звучит от play/resume/sync до pause/end/stop или до следующего session.' };
+  return { rows, text: [meta, ...rows].map(x => JSON.stringify(x)).join('\n') + '\n' };
+}
+function updateLogInfo() {
+  const el = $('s-loginfo'); if (!el) return;
+  const { rows } = exportLog(), plays = rows.filter(e => e.ev === 'play');
+  el.innerHTML = rows.length
+    ? `<small>Записей: ${rows.length}, треков: ${plays.length}, с ${esc(rows[0].t.slice(0, 16).replace('T', ' '))} по ${esc(rows[rows.length - 1].t.slice(0, 16).replace('T', ' '))}.</small>`
+    : '<small>За этот период лог пуст. Он появится, когда в плеере (источник OBS) заиграет музыка.</small>';
+}
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch {}
+  const ta = document.createElement('textarea'); ta.value = t; ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+  document.body.appendChild(ta); ta.select();
+  let ok = false; try { ok = document.execCommand('copy'); } catch {}
+  ta.remove(); return ok;
+}
+
 /* ---------- утилиты ---------- */
 function extractVideoId(s) {
   if (!s) return null;
@@ -716,7 +818,7 @@ function warn(t, key = t) { if (/связи с Twitch/.test(t)) key = 'conn'; WA
 function hideWarn(key = 'conn') { WARNS.delete(key); drawWarns(); }
 
 // экспорт для тестов
-window.__mp = { switchPlaylist, isoDur, extractVideoId, extractPlaylistId, S, onRedemption, onChat, next };
+window.__mp = { switchPlaylist, isoDur, extractVideoId, extractPlaylistId, S, onRedemption, onChat, next, onState, exportLog };
 
 if (location.hash === '#obs') playerMode(); else setupMode();
 </script>
