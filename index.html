@@ -50,6 +50,14 @@
   .row { display: flex; gap: 12px; } .row > div { flex: 1; }
   .ok { color: #8ef0a8; } .err { color: #ff9b9b; }
   small { color: var(--muted); }
+  #s-live { background: #0e0e14; border-radius: 12px; padding: 12px 14px; margin-bottom: 16px; font-size: 14px; }
+  #s-live h3 { margin: 10px 0 4px; font-size: 14px; color: var(--muted); font-weight: 600; }
+  #s-live h3:first-child { margin-top: 0; }
+  #s-live .li { padding: 4px 8px; border-radius: 7px; background: #18181f; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #s-live .li.now { background: #2a1d45; font-weight: 600; }
+  #s-live .who { color: #d4b8ff; font-weight: 400; }
+  #s-live .tm { color: var(--muted); font-weight: 400; font-size: 12px; }
+  #s-live .empty { color: var(--muted); font-size: 13px; padding: 2px 8px; }
 </style>
 </head>
 <body>
@@ -58,6 +66,11 @@
 <div id="setup">
   <button id="s-close" type="button" style="display:none;float:right;margin:0;background:#444">✕ Закрыть</button>
   <h1>🎵 Плеер для заказа музыки</h1>
+  <div id="s-live">
+    <h3>▶️ Сейчас играет</h3><div id="lv-now"></div>
+    <h3>📋 Очередь заказов</h3><div id="lv-queue"></div>
+    <h3>🕘 Последние 3 трека</h3><div id="lv-hist"></div>
+  </div>
   <p id="s-notobs" style="display:none;background:#4a3a14;border-radius:10px;padding:10px 12px">⚠️ Эта страница открыта в обычном браузере, и настройки сохранятся только в нём. Плеер в OBS их не увидит. Настраивайте в OBS: <b>Док-панели → Пользовательские док-панели браузера</b>, адрес <code>https://ilen1n.github.io/obs-music/</code>.</p>
   <div id="s-step1">
     <p>1. Создайте приложение на <a href="https://dev.twitch.tv/console/apps" target="_blank" style="color:#d4b8ff">dev.twitch.tv/console/apps</a>. В поле <b>OAuth Redirect URLs</b> вставьте ровно этот адрес:<br><code id="s-redirect"></code></p>
@@ -124,7 +137,7 @@
       <p id="s-loginfo" style="margin-bottom:0"></p>
       <textarea id="s-logtext" readonly style="display:none;margin-top:8px"></textarea>
     </div>
-    <p><small style="opacity:.6">версия 9 · плеер: #obs</small></p>
+    <p><small style="opacity:.6">версия 10 · плеер: #obs</small></p>
     <div id="s-done">
       <p><b>Плеер в OBS:</b> Источник → Браузер, адрес <code>https://ilen1n.github.io/obs-music/#obs</code>, ширина 500, высота 400, включите «Управлять звуком через OBS». Адрес постоянный — менять его не нужно. Всё, что вы сохраните здесь, плеер применит сам через пару секунд.</p>
     </div>
@@ -267,7 +280,9 @@ async function setupMode(embedded) {
   };
   updateLogInfo();
 
-  ls.set('token', null);                             // старый способ входа больше не используется
+  renderLive(); setInterval(renderLive, 1000); window.addEventListener('storage', e => { if (e.key === 'mp_live') renderLive(); });
+
+  ls.set('token', null);                            // старый способ входа больше не используется
   if (!window.obsstudio) $('s-notobs').style.display = 'block';
   setLoggedIn(!!ls.get('auth', null));
 }
@@ -377,9 +392,16 @@ const S = {
   maxSec: 360, minViews: 10000, ytKey: '', mods: new Set(), perUser: 2, volume: 40, pls: [], pl: null,
   queue: ls.get('queue', []),        // [{vid, user, userId, redemptionId}]
   bg: [], bgPos: 0,                  // фоновый плейлист
-  current: null,                     // {vid, user?, redemptionId?, checked}
+  current: null,                     // {vid, user?, redemptionId?, checked, started, failed, resolved, loadAt, item}
+  history: ls.get('history', []),    // последние 3 сыгранных трека [{vid, title, user, at}]
   player: null, ready: false,
+  advTimer: null,                    // отложенный переход к следующему треку (один на всех)
+  errStreak: 0,                      // сколько треков подряд не заиграло — защита от «перелистывания»
+  lastSkipAt: 0,                     // скипы чаще раза в 4 с не проходят (второй скип того же трека)
+  seen: new Set(),                   // ID сообщений EventSub — Twitch иногда присылает одно событие дважды
 };
+const BAD_VIDEO = [100, 101, 150];   // удалено / запрещено к встраиванию — повторять бесполезно
+const ERR_TEXT = { 2: 'неверная ссылка', 5: 'ошибка плеера', 100: 'видео удалено или скрыто', 101: 'запрещено к встраиванию', 150: 'запрещено к встраиванию', timeout: 'не загрузилось', early: 'оборвалось в начале' };
 
 async function playerMode() {
   $('overlay').style.display = 'block';
@@ -438,23 +460,69 @@ async function playerMode() {
 
 function next() {
   if (!S.ready) return;
+  clearTimeout(S.advTimer); S.advTimer = null;
+  const prev = S.current;
   closeTrack('stop');                                  // скип, смена плейлиста, ошибка — трек оборвался
+  if (prev && !prev.failed) { fulfil(prev); pushHistory(prev); }
   let item = S.queue.shift();
   saveQueue();
   if (!item) {
-    if (!S.bg.length) { S.current = null; renderCard(); return; }
+    if (!S.bg.length) { S.current = null; renderCard(); renderQueue(); return; }
     if (S.bgPos >= S.bg.length) { S.bg = shuffle(S.bg); S.bgPos = 0; }
     item = { vid: S.bg[S.bgPos++] };
   }
-  S.current = { ...item, checked: false };
+  S.current = { ...item, item, checked: false, loadAt: Date.now() };
   S.player.loadVideoById(item.vid);
   renderQueue();
+}
+function advance(ms) { clearTimeout(S.advTimer); S.advTimer = setTimeout(next, ms); }
+
+// Заказ засчитывается, только когда трек реально прозвучал (15 с) или его скипнули.
+// Если трек сломался раньше — баллы ещё можно вернуть.
+function fulfil(c) { if (c?.redemptionId && !c.resolved) { c.resolved = true; resolveRedemption(c, true); } }
+function refund(c) { if (c?.redemptionId && !c.resolved) { c.resolved = true; resolveRedemption(c, false); return true; } return false; }
+
+function pushHistory(c) {
+  if (!c.logged) return;                               // не прозвучал — не считаем
+  S.history = [{ vid: c.vid, title: c.title || '', user: c.user || '', at: Date.now() }, ...S.history].slice(0, 3);
+  ls.set('history', S.history);
+}
+
+// Трек не играет (ошибка YouTube, завис, оборвался в начале).
+function trackFailed(c, reason) {
+  if (!c || c.failed || S.current !== c) return;
+  c.failed = true;
+  closeTrack('stop');
+  musicLog('error', { vid: c.vid, reason: String(reason), pos: curPos() });
+  S.errStreak++;
+  const fatal = BAD_VIDEO.includes(reason);
+  if (c.redemptionId && !c.resolved) {
+    if (!fatal && !c.retried) {                        // заказ: одна повторная попытка
+      S.queue.unshift({ ...c.item, retried: true }); saveQueue();
+    } else {
+      refund(c);
+      say(`@${c.user}, трек не проигрывается (${ERR_TEXT[reason] || 'ошибка ' + reason}) — баллы вернул.`);
+    }
+  } else if (!c.redemptionId && fatal) {
+    S.bg = S.bg.filter(v => v !== c.vid);              // выкидываем битый трек из фона
+  }
+  if (S.errStreak >= 4) {                              // YouTube подряд не даёт играть — не перелистываем, ждём
+    warn(`YouTube не даёт играть треки (${S.errStreak} подряд, последняя причина: ${ERR_TEXT[reason] || reason}). Пауза 30 с и пробую снова.`, 'yt');
+    try { S.player.stopVideo(); } catch {}
+    advance(30000);
+  } else advance(800);
 }
 
 function onState(e) {
   const st = e.data, prev = S.lastState, c = S.current, P = YT.PlayerState;
   S.lastState = st;
-  if (st === P.ENDED) { closeTrack('end'); return next(); }
+  if (st === P.ENDED) {
+    if (!c || c.failed) return;
+    const dur = S.player.getDuration() || 0;
+    if (!c.ok15 && dur > 30) return trackFailed(c, 'early');   // «доиграл» за пару секунд — это сбой
+    closeTrack('end'); return next();
+  }
+  if (st === P.PLAYING && c) c.started = true;
   if (c && c.logged && !c.closed) {
     if (st === P.PAUSED) musicLog('pause', { vid: c.vid, pos: curPos() });
     if (st === P.PLAYING && (prev === P.PAUSED || prev === P.BUFFERING)) musicLog(prev === P.PAUSED ? 'resume' : 'sync', { vid: c.vid, pos: curPos() });
@@ -464,34 +532,55 @@ function onState(e) {
     const dur = S.player.getDuration();
     if (S.current.redemptionId) {
       if (!S.current.priv && dur > S.maxSec + 5) {
-        resolveRedemption(S.current, false);
+        refund(S.current);
         say(`@${S.current.user}, трек длиннее ${Math.round(S.maxSec / 60)} мин — баллы вернул.`);
         return next();
       }
-      resolveRedemption(S.current, true);
-      const d = S.player.getVideoData();
-      say(`▶️ Сейчас играет заказ от @${S.current.user}: ${d.title}`);
+      if (!S.current.retried) {
+        const d = S.player.getVideoData();
+        say(`▶️ Сейчас играет заказ от @${S.current.user}: ${d.title}`);
+      }
     }
     logTrackStart(S.current, dur);
     renderCard();
   }
 }
 
+// YouTube может прислать ошибку дважды или с опозданием — уже для следующего трека.
+// Поэтому ждём 1,5 с: если трек играет, ошибка была не его.
 function onYTError(e) {
-  const cur = S.current;
-  if (cur && cur.redemptionId) {
-    resolveRedemption(cur, false);
-    say(`@${cur.user}, это видео нельзя проиграть (удалено или запрещено к встраиванию) — баллы вернул.`);
-  } else if (cur) {
-    S.bg = S.bg.filter(v => v !== cur.vid);   // выкидываем битый трек из фона
-  }
-  setTimeout(next, 500);
+  const c = S.current, code = e.data;
+  if (!c || c.failed) return;
+  console.warn('YT error', code, c.vid);
+  setTimeout(() => {
+    if (S.current !== c || c.failed) return;
+    let st = null, t = 0; try { st = S.player.getPlayerState(); t = S.player.getCurrentTime(); } catch {}
+    if (st === YT.PlayerState.PLAYING && t > 0.5) return;
+    trackFailed(c, code);
+  }, 1500);
 }
 
+let liveTick = 0;
 function tick() {
+  if (++liveTick % 2 === 0) publishLive();
   if (!S.ready || !S.current) return;
-  const d = S.player.getDuration(), t = S.player.getCurrentTime();
+  const c = S.current, d = S.player.getDuration(), t = S.player.getCurrentTime();
   $('t-bar').style.width = d ? Math.min(100, t / d * 100) + '%' : '0';
+  if (c.failed) return;
+  if (c.started && t >= 15 && !c.ok15) { c.ok15 = true; S.errStreak = 0; hideWarn('yt'); fulfil(c); }
+  if (!c.started && Date.now() - c.loadAt > 15000 && S.player.getPlayerState() !== YT.PlayerState.PAUSED) trackFailed(c, 'timeout');
+}
+
+// Состояние для панели: сейчас играет, очередь, последние 3
+function publishLive() {
+  const c = S.current;
+  let now = null;
+  if (c && S.ready) {
+    const d = S.player.getVideoData() || {};
+    now = { vid: c.vid, title: cleanTitle(d.title || c.title || ''), user: c.user || '', pl: c.redemptionId ? '' : (S.pl?.n || ''),
+            pos: curPos() || 0, dur: Math.round(S.player.getDuration() || 0), paused: S.lastState === YT.PlayerState.PAUSED };
+  }
+  ls.set('live', { ts: Date.now(), now, queue: S.queue.map(q => ({ vid: q.vid, title: q.title || '', user: q.user, urgent: !!q.urgent, mine: q.userId === S.me?.id })), hist: S.history });
 }
 
 function renderCard() {
@@ -518,25 +607,28 @@ async function onRedemption(ev) {
   const user = ev.user_name;
   const r = { redemptionId: ev.id, rewardId: rid, user, userId: ev.user_id };
 
-  if (rid === S.rs) {                                   // ---- скип
+  if (rid === S.rs) {                                   // ---- скип (при любой неудаче баллы возвращаются)
     const cur = S.current;
     if (!cur || !S.ready) { resolveRedemption(r, false); return say(`@${user}, сейчас ничего не играет — баллы вернул.`); }
+    if (isStreamerTrack(cur) && ev.user_id !== S.me?.id) { resolveRedemption(r, false); return say(`@${user}, трек, который заказал стример, скипнуть нельзя — баллы вернул.`); }
+    if (Date.now() - S.lastSkipAt < 4000) { resolveRedemption(r, false); return say(`@${user}, этот трек уже скипнули — баллы вернул.`); }
     resolveRedemption(r, true);
     const t = cleanTitle(S.player.getVideoData()?.title || '');
     say(`⏭️ @${user} скипнул трек${t ? ': ' + t : ''}`);
+    S.lastSkipAt = Date.now();
     return next();
   }
 
   const urgent = rid === S.ru;                          // ---- заказ / срочный заказ
   const vid = extractVideoId((ev.user_input || '').trim());
   if (!vid) { resolveRedemption(r, false); return say(`@${user}, нужна ссылка на YouTube или YouTube Music — баллы вернул.`); }
-  if (S.queue.filter(q => q.userId === ev.user_id).length >= S.perUser) {
+  const priv = isPrivileged(ev.user_id);
+  if (ev.user_id !== S.me?.id && S.queue.filter(q => q.userId === ev.user_id).length >= S.perUser) {   // у стримера лимита нет
     resolveRedemption(r, false); return say(`@${user}, у тебя уже ${S.perUser} трека в очереди — баллы вернул, закажи чуть позже.`);
   }
   if (S.queue.some(q => q.vid === vid) || (S.current && S.current.vid === vid)) {
     resolveRedemption(r, false); return say(`@${user}, этот трек уже в очереди — баллы вернул.`);
   }
-  const priv = isPrivileged(ev.user_id);
   if (!priv) {
     const info = await getVideoInfo(vid);
     if (info.views != null && info.views < S.minViews) {
@@ -576,7 +668,12 @@ function onChat(ev) {
   if (!text.startsWith('!')) return;
   const [cmd, ...rest] = text.split(/\s+/); const arg = rest.join(' ');
   const badges = (ev.badges || []).map(b => b.set_id);
-  const isMod = badges.includes('broadcaster') || badges.includes('moderator') || ev.chatter_user_id === S.me.id;
+  const isStreamer = ev.chatter_user_id === S.me.id || badges.includes('broadcaster');
+  // у старшего модератора значок lead_moderator, а не moderator
+  const modBadge = badges.includes('moderator') || badges.includes('lead_moderator');
+  if (modBadge) S.mods.add(ev.chatter_user_id);
+  const isMod = isStreamer || modBadge || S.mods.has(ev.chatter_user_id);
+  const who = ev.chatter_user_name || ev.chatter_user_login || '';
   switch (cmd.toLowerCase()) {
     case '!song': case '!трек': {
       const d = S.player?.getVideoData?.() || {};
@@ -585,7 +682,11 @@ function onChat(ev) {
     case '!queue': case '!очередь':
       return say(S.queue.length ? 'Очередь: ' + S.queue.slice(0, 5).map((q, i) => `${i + 1}) ${q.title || q.vid} (${q.user})`).join(' | ') : 'Очередь пуста, играет плейлист стримера.');
     case '!skip': case '!скип':
-      if (isMod) { next(); } return;
+      if (!isMod || !S.current) return;
+      if (isStreamerTrack(S.current) && !isStreamer) return say(`@${who}, трек, который заказал стример, скипать нельзя.`);
+      if (Date.now() - S.lastSkipAt < 4000) return;    // два мода написали !скип одновременно — скипаем один трек
+      S.lastSkipAt = Date.now();
+      return next();
     case '!vol': case '!громкость': {
       if (!isMod) return;
       const n = Math.max(0, Math.min(100, parseInt(arg)));
@@ -604,8 +705,9 @@ function onChat(ev) {
     }
     case '!clearqueue': case '!очистить':
       if (!isMod) return;
-      S.queue.forEach(q => resolveRedemption(q, false));
-      S.queue = []; saveQueue(); renderQueue(); return say('Очередь очищена, баллы вернул.');
+      if (isStreamer) { S.queue.forEach(q => resolveRedemption(q, false)); S.queue = []; }
+      else { S.queue.filter(q => !isStreamerTrack(q)).forEach(q => resolveRedemption(q, false)); S.queue = S.queue.filter(isStreamerTrack); }   // заказы стримера мод не трогает
+      saveQueue(); renderQueue(); return say('Очередь очищена, баллы вернул.');
   }
 }
 
@@ -647,6 +749,8 @@ function connectEventSub(url = 'wss://eventsub.wss.twitch.tv/ws', isReconnect = 
       connectEventSub(nu, true);
       setTimeout(() => old.close(), 2000);
     } else if (type === 'notification') {
+      const mid = msg.metadata.message_id;                 // одно и то же событие не обрабатываем дважды
+      if (mid) { if (S.seen.has(mid)) return; S.seen.add(mid); if (S.seen.size > 500) S.seen = new Set([...S.seen].slice(-200)); }
       const t = msg.metadata.subscription_type, ev = msg.payload.event;
       if (t === 'channel.channel_points_custom_reward_redemption.add') onRedemption(ev);
       if (t === 'channel.chat.message') onChat(ev);
@@ -709,6 +813,7 @@ function fetchPlaylistIdsViaPlayer(list) {
 
 // Стример и модераторы — без лимитов
 function isPrivileged(uid) { return uid === S.me?.id || S.mods.has(uid); }
+function isStreamerTrack(c) { return !!(c && c.redemptionId && S.me && c.userId === S.me.id); }
 async function loadMods() {
   if (!S.tw) return;
   try {
@@ -768,6 +873,7 @@ function logTrackStart(c, dur) {
   if (!c || c.logged) return;
   const d = S.player.getVideoData() || {};
   c.logged = true;
+  c.title = cleanTitle(d.title || c.title || '');
   musicLog('play', {
     vid: c.vid, url: 'https://youtu.be/' + c.vid, title: cleanTitle(d.title || c.title || ''), author: (d.author || '').replace(/ - Topic$/, ''),
     pos: curPos(), dur: Math.round(dur || 0), src: c.redemptionId ? (c.urgent ? 'urgent' : 'order') : 'bg',
@@ -802,6 +908,32 @@ async function copyText(t) {
   ta.remove(); return ok;
 }
 
+/* ---------- панель: сейчас / очередь / последние ---------- */
+function fmtTime(s) { s = Math.max(0, Math.round(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
+function renderLive() {
+  if (!$('lv-now')) return;
+  const L = ls.get('live', null);
+  const fresh = L && Date.now() - L.ts < 10000;
+  const name = x => esc(x.title || 'youtu.be/' + x.vid);
+  const who = x => x.user ? ` <span class="who">— ${esc(x.user)}</span>` : '';
+  if (!fresh) {
+    $('lv-now').innerHTML = `<div class="empty">${L ? 'Плеер не отвечает — OBS закрыт или источник выключен.' : 'Плеер ещё не запускался. Если OBS открыт, а тут пусто — откройте эту панель через ⚙ в самом источнике (правой кнопкой → «Взаимодействовать»).'}</div>`;
+  } else if (!L.now) {
+    $('lv-now').innerHTML = '<div class="empty">Тишина</div>';
+  } else {
+    const n = L.now;
+    $('lv-now').innerHTML = `<div class="li now">${n.paused ? '⏸ ' : ''}${name(n)}${n.user ? who(n) : n.pl ? ` <span class="tm">· плейлист «${esc(n.pl)}»</span>` : ''} <span class="tm">${fmtTime(n.pos)} / ${fmtTime(n.dur)}</span></div>`;
+  }
+  const q = (L && L.queue) || [];
+  $('lv-queue').innerHTML = q.length
+    ? q.map((x, i) => `<div class="li">${i + 1}. ${x.urgent ? '🚨 ' : ''}${x.mine ? '🔒 ' : ''}${name(x)}${who(x)}</div>`).join('')
+    : '<div class="empty">Заказов нет — играет фоновый плейлист</div>';
+  const h = (L && L.hist) || ls.get('history', []);
+  $('lv-hist').innerHTML = h.length
+    ? h.map(x => `<div class="li"><span class="tm">${new Date(x.at).toTimeString().slice(0, 5)}</span> ${name(x)}${who(x)}</div>`).join('')
+    : '<div class="empty">Пока пусто</div>';
+}
+
 /* ---------- утилиты ---------- */
 function extractVideoId(s) {
   if (!s) return null;
@@ -818,7 +950,7 @@ function warn(t, key = t) { if (/связи с Twitch/.test(t)) key = 'conn'; WA
 function hideWarn(key = 'conn') { WARNS.delete(key); drawWarns(); }
 
 // экспорт для тестов
-window.__mp = { switchPlaylist, isoDur, extractVideoId, extractPlaylistId, S, onRedemption, onChat, next, onState, exportLog };
+window.__mp = { trackFailed, tick, publishLive, renderLive, switchPlaylist, isoDur, extractVideoId, extractPlaylistId, S, onRedemption, onChat, next, onState, exportLog };
 
 if (location.hash === '#obs') playerMode(); else setupMode();
 </script>
