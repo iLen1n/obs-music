@@ -57,6 +57,9 @@
   #s-live .li.now { background: #2a1d45; font-weight: 600; }
   #s-live .who { color: #d4b8ff; font-weight: 400; }
   #s-live .tm { color: var(--muted); font-weight: 400; font-size: 12px; }
+  #s-live .btn { margin: 0 6px 0 0 !important; padding: 6px 10px !important; font-size: 13px !important; border-radius: 7px !important; }
+  #s-live .btn.on { background: #b3402b !important; } #s-live .btn.off { background: #2f9e5b !important; } #s-live .btn.gray { background: #444 !important; }
+  #s-live .li .btn { float: right; margin: -2px 0 0 6px !important; padding: 2px 8px !important; }
   #s-live .empty { color: var(--muted); font-size: 13px; padding: 2px 8px; }
 </style>
 </head>
@@ -70,6 +73,9 @@
     <h3>▶️ Сейчас играет</h3><div id="lv-now"></div>
     <h3>📋 Очередь заказов</h3><div id="lv-queue"></div>
     <h3>🕘 Последние 3 трека</h3><div id="lv-hist"></div>
+    <h3>🎛 Управление</h3><div id="lv-ctl"></div>
+    <h3>🚫 Заблокированные треки</h3><div id="lv-blocked"></div>
+    <small id="lv-msg"></small>
   </div>
   <p id="s-notobs" style="display:none;background:#4a3a14;border-radius:10px;padding:10px 12px">⚠️ Эта страница открыта в обычном браузере, и настройки сохранятся только в нём. Плеер в OBS их не увидит. Настраивайте в OBS: <b>Док-панели → Пользовательские док-панели браузера</b>, адрес <code>https://ilen1n.github.io/obs-music/</code>.</p>
   <div id="s-step1">
@@ -137,7 +143,7 @@
       <p id="s-loginfo" style="margin-bottom:0"></p>
       <textarea id="s-logtext" readonly style="display:none;margin-top:8px"></textarea>
     </div>
-    <p><small style="opacity:.6">версия 10 · плеер: #obs</small></p>
+    <p><small style="opacity:.6">версия 11 · плеер: #obs</small></p>
     <div id="s-done">
       <p><b>Плеер в OBS:</b> Источник → Браузер, адрес <code>https://ilen1n.github.io/obs-music/#obs</code>, ширина 500, высота 400, включите «Управлять звуком через OBS». Адрес постоянный — менять его не нужно. Всё, что вы сохраните здесь, плеер применит сам через пару секунд.</p>
     </div>
@@ -280,6 +286,15 @@ async function setupMode(embedded) {
   };
   updateLogInfo();
 
+  $('s-live').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.p) panelCmd({ cmd: 'pause', kind: b.dataset.p, on: b.dataset.on === '1' });
+    if (b.dataset.b) {                                  // двойное нажатие вместо confirm(): в OBS окна-подтверждения могут не открываться
+      if (PANEL_ARM.vid === b.dataset.b && Date.now() - PANEL_ARM.at < 4000) { PANEL_ARM.vid = null; panelCmd({ cmd: 'block', vid: b.dataset.b }); }
+      else { PANEL_ARM.vid = b.dataset.b; PANEL_ARM.at = Date.now(); renderLive(); }
+    }
+    if (b.dataset.u) panelCmd({ cmd: 'unblock', vid: b.dataset.u });
+  });
   renderLive(); setInterval(renderLive, 1000); window.addEventListener('storage', e => { if (e.key === 'mp_live') renderLive(); });
 
   ls.set('token', null);                            // старый способ входа больше не используется
@@ -313,11 +328,12 @@ async function oauthToken(params) {
 
 const SCOPES = ['channel:manage:redemptions', 'channel:read:redemptions', 'user:read:chat', 'user:write:chat', 'moderation:read'];
 function rewardSpecs(c) {
+  const pz = ls.get('paused', {});
   const linkPrompt = 'Вставьте ссылку на YouTube или YouTube Music. Неверная ссылка, трек длиннее лимита или недоступное видео — баллы вернутся.';
   return [
-    { title: c.title || 'Музыка', cost: c.cost || 50, prompt: linkPrompt, is_user_input_required: true },
-    { title: c.utitle || 'Срочно музыка', cost: c.ucost || 150, prompt: 'Трек без очереди: играет сразу после текущего заказа, раньше обычных. ' + linkPrompt, is_user_input_required: true },
-    { title: c.stitle || 'Скип музыки', cost: c.scost || 300, prompt: 'Пропустить трек, который сейчас играет.', is_user_input_required: false },
+    { title: c.title || 'Музыка', cost: c.cost || 50, prompt: linkPrompt, is_user_input_required: true, is_paused: !!pz.orders },
+    { title: c.utitle || 'Срочно музыка', cost: c.ucost || 150, prompt: 'Трек без очереди: играет сразу после текущего заказа, раньше обычных. ' + linkPrompt, is_user_input_required: true, is_paused: !!pz.orders },
+    { title: c.stitle || 'Скип музыки', cost: c.scost || 300, prompt: 'Пропустить трек, который сейчас играет.', is_user_input_required: false, is_paused: !!pz.skip },
   ];
 }
 
@@ -398,6 +414,9 @@ const S = {
   advTimer: null,                    // отложенный переход к следующему треку (один на всех)
   errStreak: 0,                      // сколько треков подряд не заиграло — защита от «перелистывания»
   lastSkipAt: 0,                     // скипы чаще раза в 4 с не проходят (второй скип того же трека)
+  blocked: ls.get('blocked', []),    // заблокированные треки [{vid, title, by, at}]
+  paused: ls.get('paused', {}),      // {orders: bool, skip: bool} — приём заказов / скипа на паузе
+  lastCmd: Math.max(0, ...ls.get('cmds', []).map(x => x.id)),   // команды из панели, старые не повторяем
   seen: new Set(),                   // ID сообщений EventSub — Twitch иногда присылает одно событие дважды
 };
 const BAD_VIDEO = [100, 101, 150];   // удалено / запрещено к встраиванию — повторять бесполезно
@@ -464,6 +483,7 @@ function next() {
   const prev = S.current;
   closeTrack('stop');                                  // скип, смена плейлиста, ошибка — трек оборвался
   if (prev && !prev.failed) { fulfil(prev); pushHistory(prev); }
+  S.bg = S.bg.filter(v => !isBlocked(v));
   let item = S.queue.shift();
   saveQueue();
   if (!item) {
@@ -562,7 +582,7 @@ function onYTError(e) {
 
 let liveTick = 0;
 function tick() {
-  if (++liveTick % 2 === 0) publishLive();
+  if (++liveTick % 2 === 0) { runPanelCmds(); publishLive(); }
   if (!S.ready || !S.current) return;
   const c = S.current, d = S.player.getDuration(), t = S.player.getCurrentTime();
   $('t-bar').style.width = d ? Math.min(100, t / d * 100) + '%' : '0';
@@ -580,7 +600,7 @@ function publishLive() {
     now = { vid: c.vid, title: cleanTitle(d.title || c.title || ''), user: c.user || '', pl: c.redemptionId ? '' : (S.pl?.n || ''),
             pos: curPos() || 0, dur: Math.round(S.player.getDuration() || 0), paused: S.lastState === YT.PlayerState.PAUSED };
   }
-  ls.set('live', { ts: Date.now(), now, queue: S.queue.map(q => ({ vid: q.vid, title: q.title || '', user: q.user, urgent: !!q.urgent, mine: q.userId === S.me?.id })), hist: S.history });
+  ls.set('live', { ts: Date.now(), now, queue: S.queue.map(q => ({ vid: q.vid, title: q.title || '', user: q.user, urgent: !!q.urgent, mine: q.userId === S.me?.id })), hist: S.history, blocked: S.blocked, paused: S.paused, cur: S.current ? { vid: S.current.vid, mine: isStreamerTrack(S.current) } : null });
 }
 
 function renderCard() {
@@ -609,6 +629,7 @@ async function onRedemption(ev) {
 
   if (rid === S.rs) {                                   // ---- скип (при любой неудаче баллы возвращаются)
     const cur = S.current;
+    if (S.paused.skip) { resolveRedemption(r, false); return say(`@${user}, скип сейчас на паузе — баллы вернул.`); }
     if (!cur || !S.ready) { resolveRedemption(r, false); return say(`@${user}, сейчас ничего не играет — баллы вернул.`); }
     if (isStreamerTrack(cur) && ev.user_id !== S.me?.id) { resolveRedemption(r, false); return say(`@${user}, трек, который заказал стример, скипнуть нельзя — баллы вернул.`); }
     if (Date.now() - S.lastSkipAt < 4000) { resolveRedemption(r, false); return say(`@${user}, этот трек уже скипнули — баллы вернул.`); }
@@ -620,8 +641,10 @@ async function onRedemption(ev) {
   }
 
   const urgent = rid === S.ru;                          // ---- заказ / срочный заказ
+  if (S.paused.orders && ev.user_id !== S.me?.id) { resolveRedemption(r, false); return say(`@${user}, приём заказов сейчас на паузе — баллы вернул.`); }
   const vid = extractVideoId((ev.user_input || '').trim());
   if (!vid) { resolveRedemption(r, false); return say(`@${user}, нужна ссылка на YouTube или YouTube Music — баллы вернул.`); }
+  if (isBlocked(vid)) { resolveRedemption(r, false); return say(`@${user}, этот трек заблокирован — баллы вернул.`); }
   const priv = isPrivileged(ev.user_id);
   if (ev.user_id !== S.me?.id && S.queue.filter(q => q.userId === ev.user_id).length >= S.perUser) {   // у стримера лимита нет
     resolveRedemption(r, false); return say(`@${user}, у тебя уже ${S.perUser} трека в очереди — баллы вернул, закажи чуть позже.`);
@@ -703,6 +726,29 @@ function onChat(ev) {
       if (!found) return say(`Не нашёл плейлист «${arg}». Доступны: ${names}`);
       return switchPlaylist(found);
     }
+    case '!block': case '!блок': {
+      if (!isMod) return;
+      const vid = arg ? extractVideoId(arg) : S.current?.vid;
+      if (!vid) return say(arg ? `@${who}, не понял ссылку.` : 'Сейчас ничего не играет.');
+      return blockTrack(vid, who, isStreamer);
+    }
+    case '!unblock': case '!разблок': {
+      if (!isMod) return;
+      const vid = extractVideoId(arg) || (/^\d+$/.test(arg) ? S.blocked[parseInt(arg) - 1]?.vid : null) || (!arg ? S.blocked[0]?.vid : null);
+      if (!vid) return say(`@${who}, укажи ссылку или номер из !блоклист.`);
+      return unblockTrack(vid);
+    }
+    case '!blocklist': case '!блоклист':
+      if (!isMod) return;
+      return say(S.blocked.length ? 'Заблокированы: ' + S.blocked.slice(0, 8).map((b, i) => `${i + 1}) ${b.title || b.vid}`).join(' | ') : 'Заблокированных треков нет.');
+    case '!orders': case '!заказы':
+      if (!isMod) return;
+      if (!arg) return say(`Приём заказов ${S.paused.orders ? '⏸ на паузе' : '▶️ открыт'}. Скип ${S.paused.skip ? '⏸ на паузе' : '▶️ работает'}.`);
+      return setPause('orders', parseOnOff(arg, !S.paused.orders));
+    case '!skips': case '!скипы':
+      if (!isMod) return;
+      if (!arg) return say(`Скип ${S.paused.skip ? '⏸ на паузе' : '▶️ работает'}.`);
+      return setPause('skip', parseOnOff(arg, !S.paused.skip));
     case '!clearqueue': case '!очистить':
       if (!isMod) return;
       if (isStreamer) { S.queue.forEach(q => resolveRedemption(q, false)); S.queue = []; }
@@ -724,6 +770,66 @@ let sayBusy = Promise.resolve();
 function say(message) {
   if (!S.tw) return;
   sayBusy = sayBusy.then(() => S.tw('POST', 'chat/messages', { broadcaster_id: S.me.id, sender_id: S.me.id, message: message.slice(0, 480) }).catch(e => console.warn('chat', e)));
+}
+
+/* ---------- блокировка треков ---------- */
+function isBlocked(vid) { return S.blocked.some(b => b.vid === vid); }
+async function blockTrack(vid, who, byStreamer) {
+  const cur = S.current && S.current.vid === vid ? S.current : null;
+  if (cur && isStreamerTrack(cur) && !byStreamer) return say(`@${who}, трек, который заказал стример, блокировать нельзя.`);
+  if (isBlocked(vid)) return say('Этот трек уже заблокирован.');
+  let title = '';
+  if (cur) title = cleanTitle(S.player.getVideoData()?.title || cur.title || '');
+  else title = (S.queue.find(q => q.vid === vid) || {}).title || await fetchTitle(vid);
+  S.blocked = [{ vid, title, by: who, at: Date.now() }, ...S.blocked]; ls.set('blocked', S.blocked);
+  S.bg = S.bg.filter(v => v !== vid);
+  // заказы этого трека из очереди убираем — баллы не возвращаем (трек сочли неподходящим)
+  const removed = S.queue.filter(q => q.vid === vid && (byStreamer || !isStreamerTrack(q)));
+  removed.forEach(q => resolveRedemption(q, true));
+  S.queue = S.queue.filter(q => !removed.includes(q)); saveQueue(); renderQueue();
+  say(`🚫 Трек заблокирован${title ? ': ' + title : ''}. Заказать его больше нельзя.`);
+  if (cur) next();
+}
+function unblockTrack(vid) {
+  const b = S.blocked.find(x => x.vid === vid);
+  if (!b) return say('Этот трек не заблокирован.');
+  S.blocked = S.blocked.filter(x => x.vid !== vid); ls.set('blocked', S.blocked);
+  say(`✅ Трек разблокирован${b.title ? ': ' + b.title : ''}.`);
+}
+
+/* ---------- пауза приёма заказов / скипа ---------- */
+function parseOnOff(a, dflt) {
+  a = (a || '').toLowerCase();
+  if (/^(стоп|stop|выкл|off|пауза|pause|закрыть|нет)/.test(a)) return true;     // true = поставить на паузу
+  if (/^(старт|start|вкл|on|открыть|да|play|плей)/.test(a)) return false;
+  return dflt;
+}
+async function setPause(kind, on) {
+  S.paused = { ...S.paused, [kind]: !!on }; ls.set('paused', S.paused);
+  const ids = kind === 'orders' ? [S.rq, S.ru] : [S.rs];
+  for (const id of ids) if (S.tw && id) {               // ставим на паузу саму награду — зрители её не нажмут
+    try { await S.tw('PATCH', `channel_points/custom_rewards?broadcaster_id=${S.me.id}&id=${id}`, { is_paused: !!on }); } catch (e) { console.warn('pause', e); }
+  }
+  say(kind === 'orders' ? (on ? '⏸ Приём заказов музыки на паузе.' : '▶️ Приём заказов музыки снова открыт!')
+                        : (on ? '⏸ Скип музыки на паузе.' : '▶️ Скип музыки снова работает!'));
+  publishLive();
+}
+
+// Кнопки панели пишут команды в общее хранилище, плеер их выполняет (от имени стримера)
+function runPanelCmds() {
+  const list = ls.get('cmds', []).filter(x => x.id > S.lastCmd);
+  for (const x of list) {
+    S.lastCmd = x.id;
+    if (x.cmd === 'block' && x.vid) blockTrack(x.vid, S.me?.login || 'стример', true);
+    if (x.cmd === 'unblock' && x.vid) unblockTrack(x.vid);
+    if (x.cmd === 'pause') setPause(x.kind, x.on);
+  }
+}
+function panelCmd(c) {
+  const list = ls.get('cmds', []).slice(-20);
+  list.push({ id: Math.max(Date.now(), ...list.map(x => x.id + 1)), ...c });
+  ls.set('cmds', list);
+  const el = $('lv-msg'); if (el) { el.textContent = 'Отправлено в плеер…'; setTimeout(() => { el.textContent = ''; }, 3000); }
 }
 
 /* ---------- EventSub WebSocket ---------- */
@@ -910,6 +1016,7 @@ async function copyText(t) {
 
 /* ---------- панель: сейчас / очередь / последние ---------- */
 function fmtTime(s) { s = Math.max(0, Math.round(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
+const PANEL_ARM = { vid: null, at: 0 };
 function renderLive() {
   if (!$('lv-now')) return;
   const L = ls.get('live', null);
@@ -928,6 +1035,16 @@ function renderLive() {
   $('lv-queue').innerHTML = q.length
     ? q.map((x, i) => `<div class="li">${i + 1}. ${x.urgent ? '🚨 ' : ''}${x.mine ? '🔒 ' : ''}${name(x)}${who(x)}</div>`).join('')
     : '<div class="empty">Заказов нет — играет фоновый плейлист</div>';
+  const P = (fresh && L.paused) || {};
+  $('lv-ctl').innerHTML = fresh
+    ? `<button type="button" class="btn ${P.orders ? 'off' : 'on'}" data-p="orders" data-on="${P.orders ? 0 : 1}">${P.orders ? '▶️ Открыть заказы' : '⏸ Пауза заказов'}</button>`
+      + `<button type="button" class="btn ${P.skip ? 'off' : 'on'}" data-p="skip" data-on="${P.skip ? 0 : 1}">${P.skip ? '▶️ Включить скип' : '⏸ Пауза скипа'}</button>`
+      + (L.now && !(L.cur && L.cur.mine) ? `<button type="button" class="btn gray" data-b="${esc(L.now.vid)}">${PANEL_ARM.vid === L.now.vid && Date.now() - PANEL_ARM.at < 4000 ? '❗ Точно? Нажми ещё раз' : '🚫 Заблокировать текущий'}</button>` : '')
+    : '<div class="empty">Кнопки работают, когда плеер отвечает</div>';
+  const B = (L && L.blocked) || ls.get('blocked', []);
+  $('lv-blocked').innerHTML = B.length
+    ? B.map(x => `<div class="li">${fresh ? `<button type="button" class="btn gray" data-u="${esc(x.vid)}">Разблок.</button>` : ''}${name(x)} <span class="tm">· ${esc(x.by || '')}</span></div>`).join('')
+    : '<div class="empty">Нет</div>';
   const h = (L && L.hist) || ls.get('history', []);
   $('lv-hist').innerHTML = h.length
     ? h.map(x => `<div class="li"><span class="tm">${new Date(x.at).toTimeString().slice(0, 5)}</span> ${name(x)}${who(x)}</div>`).join('')
@@ -950,7 +1067,7 @@ function warn(t, key = t) { if (/связи с Twitch/.test(t)) key = 'conn'; WA
 function hideWarn(key = 'conn') { WARNS.delete(key); drawWarns(); }
 
 // экспорт для тестов
-window.__mp = { trackFailed, tick, publishLive, renderLive, switchPlaylist, isoDur, extractVideoId, extractPlaylistId, S, onRedemption, onChat, next, onState, exportLog };
+window.__mp = { blockTrack, setPause, runPanelCmds, panelCmd, trackFailed, tick, publishLive, renderLive, switchPlaylist, isoDur, extractVideoId, extractPlaylistId, S, onRedemption, onChat, next, onState, exportLog };
 
 if (location.hash === '#obs') playerMode(); else setupMode();
 </script>
