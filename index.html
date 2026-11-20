@@ -407,7 +407,7 @@ const S = {
   tw: null, me: null, rq: null, ru: null, rs: null,
   maxSec: 360, minViews: 10000, ytKey: '', mods: new Set(), perUser: 2, volume: 40, pls: [], pl: null,
   queue: ls.get('queue', []),        // [{vid, user, userId, redemptionId}]
-  bg: [], bgPos: 0,                  // фоновый плейлист
+  bg: [], bgPos: 0, bgId: null,      // фоновый плейлист: перемешанный круг и место в нём
   current: null,                     // {vid, user?, redemptionId?, checked, started, failed, resolved, loadAt, item}
   history: ls.get('history', []),    // последние 3 сыгранных трека [{vid, title, user, at}]
   player: null, ready: false,
@@ -463,7 +463,7 @@ async function playerMode() {
   } catch (e) { warn(e.message); }
 
   await loadYT();
-  S.bg = shuffle(await fetchPlaylistIds(S.pl?.id));
+  setBg(S.pl?.id, await fetchPlaylistIds(S.pl?.id));
   if (!S.bg.length && S.pl) warn(`Не удалось загрузить фоновый плейлист «${S.pl?.n || ''}». Он должен быть «Доступ по ссылке» или открытым.${S.plError ? ' YouTube: ' + S.plError : ''}`);
   S.player = new YT.Player('yt', {
     width: 320, height: 180,
@@ -483,17 +483,46 @@ function next() {
   const prev = S.current;
   closeTrack('stop');                                  // скип, смена плейлиста, ошибка — трек оборвался
   if (prev && !prev.failed) { fulfil(prev); pushHistory(prev); }
-  S.bg = S.bg.filter(v => !isBlocked(v));
+  dropFromBg(isBlocked);
   let item = S.queue.shift();
   saveQueue();
   if (!item) {
     if (!S.bg.length) { S.current = null; renderCard(); renderQueue(); return; }
-    if (S.bgPos >= S.bg.length) { S.bg = shuffle(S.bg); S.bgPos = 0; }
+    if (S.bgPos >= S.bg.length) { S.bg = shuffle(S.bg); S.bgPos = 0; }   // весь плейлист прозвучал — новый круг
     item = { vid: S.bg[S.bgPos++] };
+    saveBg();
   }
   S.current = { ...item, item, checked: false, loadAt: Date.now() };
   S.player.loadVideoById(item.vid);
   renderQueue();
+}
+/* Фоновый плейлист играет по кругу: перемешали — проиграли все треки — перемешали снова.
+   Порядок и место в круге запоминаются для каждого плейлиста, поэтому перезапуск OBS
+   или смена плейлиста не начинают круг заново. */
+function setBg(plId, ids) {
+  const st = (ls.get('bgState', {}) || {})[plId], fresh = new Set(ids);
+  if (st && Array.isArray(st.order)) {
+    const pos = Math.min(st.pos || 0, st.order.length);
+    const known = new Set(st.order);
+    const played = st.order.slice(0, pos).filter(v => fresh.has(v));
+    const left = st.order.slice(pos).filter(v => fresh.has(v));
+    const added = shuffle(ids.filter(v => !known.has(v)));   // новые треки плейлиста — в оставшуюся часть круга
+    added.forEach(v => left.splice(Math.floor(Math.random() * (left.length + 1)), 0, v));
+    S.bg = played.concat(left); S.bgPos = played.length;
+  } else { S.bg = shuffle(ids); S.bgPos = 0; }
+  S.bgId = plId;
+  saveBg();
+}
+function saveBg() {
+  if (!S.bgId) return;
+  const all = ls.get('bgState', {}) || {};
+  all[S.bgId] = { order: S.bg, pos: S.bgPos };
+  ls.set('bgState', all);
+}
+function dropFromBg(bad) {                             // убрать треки, не сбив место в круге
+  let pos = S.bgPos;
+  S.bg = S.bg.filter((v, i) => { if (!bad(v)) return true; if (i < S.bgPos) pos--; return false; });
+  S.bgPos = Math.max(0, pos); saveBg();
 }
 function advance(ms) { clearTimeout(S.advTimer); S.advTimer = setTimeout(next, ms); }
 
@@ -524,7 +553,7 @@ function trackFailed(c, reason) {
       say(`@${c.user}, трек не проигрывается (${ERR_TEXT[reason] || 'ошибка ' + reason}) — баллы вернул.`);
     }
   } else if (!c.redemptionId && fatal) {
-    S.bg = S.bg.filter(v => v !== c.vid);              // выкидываем битый трек из фона
+    dropFromBg(v => v === c.vid);                       // выкидываем битый трек из фона
   }
   if (S.errStreak >= 4) {                              // YouTube подряд не даёт играть — не перелистываем, ждём
     warn(`YouTube не даёт играть треки (${S.errStreak} подряд, последняя причина: ${ERR_TEXT[reason] || reason}). Пауза 30 с и пробую снова.`, 'yt');
@@ -761,7 +790,7 @@ async function switchPlaylist(pl) {
   const ids = await fetchPlaylistIds(pl.id);
   if (!ids.length) return say(`Плейлист «${pl.n}» не загрузился — проверьте, что он «по ссылке» или открытый.`);
   S.pl = pl; ls.set('activePl', pl.id);
-  S.bg = shuffle(ids); S.bgPos = 0;
+  setBg(pl.id, ids);
   say(`🎶 Фоновый плейлист: «${pl.n}» (${ids.length} треков)`);
   if (!S.current || !S.current.redemptionId) next();   // заказы не прерываем
 }
@@ -782,7 +811,7 @@ async function blockTrack(vid, who, byStreamer) {
   if (cur) title = cleanTitle(S.player.getVideoData()?.title || cur.title || '');
   else title = (S.queue.find(q => q.vid === vid) || {}).title || await fetchTitle(vid);
   S.blocked = [{ vid, title, by: who, at: Date.now() }, ...S.blocked]; ls.set('blocked', S.blocked);
-  S.bg = S.bg.filter(v => v !== vid);
+  dropFromBg(v => v === vid);
   // заказы этого трека из очереди убираем — баллы не возвращаем (трек сочли неподходящим)
   const removed = S.queue.filter(q => q.vid === vid && (byStreamer || !isStreamerTrack(q)));
   removed.forEach(q => resolveRedemption(q, true));
